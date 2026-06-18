@@ -1,0 +1,110 @@
+===============================================================================
+DOCUMENTO DE ESPECIFICAÇÃO TÉCNICA E PROMPT MASTER: TAÇA GUARANÁ BEER PONG
+===============================================================================
+
+Este documento contém todas as instruções, regras de negócio, paleta de cores e a 
+arquitetura do aplicativo "Taça Guaraná". Ele foi projetado para ser consumido 
+diretamente pelo Claude Code para gerar um Single Page Application (SPA) rápido, 
+leve, focado em usabilidade móvel/tablet em uma única tela centralizada durante o 
+campeonato.
+
+-------------------------------------------------------------------------------
+1. VISÃO GERAL DO PROJETO
+-------------------------------------------------------------------------------
+* Nome do App: Taça Guaraná
+* Objetivo: Gerenciar um campeonato de Beer Pong local com o mínimo de fricção possível.
+* Hardware Alvo: Um notebook ou tablet posicionado no centro do evento, visível 
+  para jogadores e torcida.
+* Premissas Chave: Agilidade extrema (marcação em 1 toque), botões gigantes, 
+  rastreamento de estatísticas individuais (MVP) e resiliência a recarregamentos de página.
+
+-------------------------------------------------------------------------------
+2. IDENTIDADE VISUAL E PALETA DE CORES (Baseada no logotipo oficial)
+-------------------------------------------------------------------------------
+Para garantir contraste máximo sob luz de festa e fidelidade à marca:
+* Verde Guaraná (Principal / Destaque): #0C4626 (Verde escuro, denso, institucional)
+* Vermelho Copo (Acento / Elementos de Jogo): #C8232B (Vermelho vivo dos copos tradicionais)
+* Branco Puro (Textos em fundos escuros / Botões): #FFFFFF
+* Fundo do App (Alto Contraste): #F8F9FA (Cinza ultra-claro para limpeza visual)
+* Cinza Neutro Escuro (Textos principais): #1A1A1A
+* Copo Eliminado / Inativo: #E9ECEF com bordas ou marcas em cinza médio (#6C757D)
+
+-------------------------------------------------------------------------------
+3. ARQUITETURA DE TELAS E NAVEGAÇÃO (TABS)
+-------------------------------------------------------------------------------
+O app deve ser dividido em 4 abas ou estados principais facilmente acessíveis no topo:
+
+A. [CONFIGURAÇÃO / CADASTRO]
+   * Input simples para adicionar nomes de jogadores individualmente (pressione Enter ou clique em Adicionar).
+   * Botão "Sorteio Mágico de Duplas": Embaralha a lista de jogadores e forma duplas automaticamente. Caso o número seja ímpar, avisa ou cria um bot/dupla com "W.O.".
+   * Opção de editar o nome da dupla formada (Ex: "Dupla 1 - Lucas & Enzão").
+   * Botão gigante: "GERAR CAMPEONATO" (Avança para o Chaveamento).
+
+B. [CHAVEAMENTO / BRACKET]
+   * Renderiza uma árvore de torneio estilo mata-mata (Eliminação Simples) para 4, 8 ou 16 duplas.
+   * Cada bloco de confronto mostra: Nome da Dupla 1 vs Nome da Dupla 2.
+   * Se o confronto estiver disponível para jogar, exibe um botão "INICIAR JOGO". Clicar aqui muda automaticamente para a aba [PLACAR] carregando os dados dessa partida.
+
+C. [PLACAR AO VIVO] (A tela principal durante o jogo)
+   * Divisão perfeita ao meio (Lado Esquerdo vs Lado Direito).
+   * Topo de cada lado: Nome da Dupla e placar de copos restantes (inicia em 6).
+   * Centro de cada lado: Representação visual clássica de 6 copos dispostos em triângulo (3-2-1).
+   * Abaixo dos copos: Dois botões GIGANTES com os nomes dos jogadores daquela dupla e um símbolo "+1 Acerto".
+   * Dinâmica de clique: 
+     - Se o "Lucas" acertou uma bola, o operador clica no botão "+1 Acerto" do Lucas.
+     - O app remove automaticamente 1 copo do TIME ADVERSÁRIO (o copo muda visualmente para cinza/apagado).
+     - O app adiciona +1 ao contador individual de copos acertados do Lucas no banco de dados.
+   * Botão no Rodapé Central: "DESFAZER ÚLTIMA AÇÃO" (Undo). Remove o último ponto marcado e devolve o copo correspondente caso haja clique errado.
+   * Condição de Vitória: Quando os copos de um lado chegam a 0, a tela exibe um modal gigante "VITÓRIA DA DUPLA X!". Um botão "Confirmar e Avançar" salva o resultado, avança a dupla na árvore do chaveamento e retorna para a aba [CHAVEAMENTO].
+
+D. [RANKING MVP]
+   * Uma tabela simples de classificação geral individual ordenada pelo número total de copos acertados durante todo o torneio.
+   * Colunas: Posição | Nome do Jogador | Dupla | Total de Copos Acertados.
+
+-------------------------------------------------------------------------------
+4. REQUISITOS TÉCNICOS E REGRAS DE NEGÓCIO (Para o Claude Code)
+-------------------------------------------------------------------------------
+1. Stack: React (Single Page Application), Vite, Tailwind CSS para estilização rápida, Lucide-react para ícones se necessário.
+2. Persistência de Dados: TODO o estado da aplicação (jogadores, duplas, partidas, histórico de ações e aba ativa) deve ser sincronizado em tempo real no `localStorage`. Se a página for atualizada ou o computador desligar, o torneio continua exatamente de onde parou.
+3. Histórico para Desfazer (Undo): Manter uma pilha (array) contendo as últimas ações para permitir reverter pelo menos as últimas 5 marcações de ponto sem quebrar a integridade estrutural do torneio.
+4. Layout Responsivo e Clean: Sem excesso de decorações, sombras pesadas ou gradientes complexos. Use o estilo flat moderno, bordas arredondadas suaves (`rounded-lg`), tipografia em negrito e tamanho de fonte grande para leitura a 3 metros de distância.
+
+===============================================================================
+5. PROMPT MASTER PARA COPIAR E COLAR NO CLAUDE CODE
+===============================================================================
+Use o prompt exato abaixo dentro do terminal do Claude Code para gerar o app:
+
+"""
+Crie um Single Page Application (SPA) completo em React, utilizando Vite e Tailwind CSS, para gerenciar um campeonato de Beer Pong local chamado "Taça Guaraná". O sistema será operado em uma única tela central (notebook ou tablet) visível para todos os participantes.
+
+Siga estritamente as especificações abaixo:
+
+1. PALETA DE CORES (Injetar no Tailwind):
+   - Verde Guaraná (Principal): `#0C4626`
+   - Vermelho Copo (Acento): `#C8232B`
+   - Fundo: `#F8F9FA`
+   - Texto Principal: `#1A1A1A`
+   - Elementos Desativados: `#E9ECEF` com texto `#6C757D`
+
+2. GERENCIAMENTO DE ESTADO E PERSISTÊNCIA:
+   - Use hooks do React (`useState`, `useEffect`).
+   - Salve todo o estado do torneio no `localStorage` a cada alteração.
+   - Implemente um sistema de "Desfazer" (Undo) robusto usando uma pilha de histórico para reverter marcações acidentais de pontos durante as partidas.
+
+3. ESTRUTURA DE ABAS (Top Navigation):
+   - O topo do app deve ter abas limpas e grandes para transitar entre: [Configuração], [Chaveamento], [Placar Atual] e [Ranking MVP]. Se um jogo estiver em andamento, destaque a aba [Placar Atual] com um indicador visual pulsante.
+
+4. FLUXO E REGRAS DE NEGÓCIO POR TELA:
+   - CONFIGURAÇÃO: Input para digitar nomes de jogadores individualmente. Um botão "Sorteio Mágico" que embaralha os jogadores e os divide em duplas. Permita alterar os nomes das duplas manualmente antes de clicar em "Iniciar Torneio". O campeonato deve suportar chaves de eliminação simples de 4 ou 8 duplas (se houver menos jogadores, preencha com W.O. ou avise).
+   - CHAVEAMENTO: Exiba graficamente a árvore do torneio (Mata-mata / Bracket). Cada confronto exibe as duas duplas e um botão "INICIAR JOGO" caso a partida esteja pronta para acontecer. Confrontos futuros ficam bloqueados.
+   - PLACAR AO VIVO: Tela dividida verticalmente. Cada lado exibe a dupla, o número de copos restantes (inicia em 6) e uma disposição gráfica de 6 copos (formato triângulo: 3 na base, 2 no meio, 1 no topo). Abaixo, exiba dois botões gigantes com o nome de cada jogador daquela dupla. Ao clicar no botão do JOGADOR, o app decrementa um copo do TIME ADVERSÁRIO (o copo correspondente fica cinza com um X vermelho) e soma +1 acerto na estatística individual desse jogador. No rodapé, inclua um botão enorme "DESFAZER ÚLTIMA AÇÃO". Quando um time zera os copos, exiba uma tela/modal de vitória e um botão para avançar a dupla vencedora na árvore do chaveamento automaticamente.
+   - RANKING MVP: Lista em tabela com todos os jogadores individuais ordenados por quem acertou mais copos no somatório de todas as partidas do torneio.
+
+5. DESIGN E USABILIDADE:
+   - O design deve ser ultra clean, moderno e intuitivo.
+   - Botões de ação dentro do jogo precisam ser gigantes para evitar cliques errados.
+   - Garanta que toda a lógica de avanço do chaveamento funcione perfeitamente de forma automatizada ao fim de cada partida.
+
+Gere o código limpo, modularizado se necessário, ou concentrado em um componente robusto de fácil manutenção.
+"""
+===============================================================================
