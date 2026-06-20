@@ -1,5 +1,8 @@
 // Chaveamento — single-elimination bracket (4/8/16). Ready match shows "INICIAR
-// JOGO", future matches locked, winners highlighted. See CLAUDE.md §4B.
+// JOGO", future matches locked, winners highlighted. The "Editar" panel is always
+// available and lets the operator rebuild EVERY phase by hand — pick the duplas of
+// any confronto and move confrontos between phases. Saving turns the bracket manual
+// (winners stop auto-advancing; the operator owns each phase). See CLAUDE.md §4B.
 import { useEffect, useRef, useState } from 'react'
 import { Play, Lock, Crown, RotateCcw, Pencil, Check, X, ArrowLeftRight } from 'lucide-react'
 import { SectionHead } from './Setup.jsx'
@@ -8,23 +11,24 @@ import {
   uid,
   roundLabel,
   nextPlayableMatch,
-  hasPlayedMatch,
-  reseedRound0,
+  applyManualEdit,
 } from '../engine.js'
 
-// Sentinel value for an empty/bye slot in the seeding editor. Real slots hold a dupla id;
-// every other slot is a free W.O. vaga that the operator can place anywhere.
+// Slot sentinels for the editor. A real slot holds a dupla id; '' is an empty vaga
+// (Vazio) and WO_SENTINEL a free W.O. bye the operator can drop anywhere.
 const WO_SENTINEL = '__wo__'
+const EMPTY = ''
 
 export default function Bracket({ ctx }) {
   const { state, setState, go, resetTournament } = ctx
   const { bracket, champion } = state
   const edition = state.tournamentName?.trim()
   const nextRef = useRef(null)
-  // Edit mode: a local working copy of the round-0 slot list (length = bracket.size).
-  // Slot p maps to match Math.floor(p/2), side A if even / B if odd.
-  const [seed, setSeed] = useState(null)
-  const editing = seed != null
+  // Edit mode working copy. null = not editing. Shape:
+  //   { matches: [{ id, phase, a, b, winnerId }], third: { id, a, b, winnerId } | null }
+  // a/b are a dupla id | WO_SENTINEL | EMPTY. `phase` = round index the match sits in.
+  const [draft, setDraft] = useState(null)
+  const editing = draft != null
 
   const onReset = () => {
     if (
@@ -55,9 +59,8 @@ export default function Bracket({ ctx }) {
   }
 
   // Padding W.O. duplas (byes) aren't kept in state.duplas — they only live inside the
-  // bracket as ids. Synthesize them here so isWO / bye-resolution work everywhere, including
-  // after a re-seed (otherwise resolveByes wouldn't recognize a bye and it'd show as a real
-  // opponent named "W.O.").
+  // bracket as ids. Synthesize them here so isWO / naming work everywhere, including after
+  // a manual edit (otherwise a bye would render as a real opponent named "W.O.").
   const realById = Object.fromEntries(state.duplas.map((d) => [d.id, d]))
   const byId = { ...realById }
   const addWO = (id) => {
@@ -70,74 +73,143 @@ export default function Bracket({ ctx }) {
   }
   const nameOf = (id) => byId[id]?.name || '—'
   const isWO = (id) => id == null || byId[id]?.isWO
-  const slotName = (id) => byId[id]?.name || (id ? 'W.O.' : 'Vazio')
   // The single match the operator should play next (used to highlight + scroll).
   const nextId = nextPlayableMatch(bracket, byId)?.id ?? null
-  // Re-seeding wipes downstream results, so only allow it before any real game is played.
-  const played = hasPlayedMatch(bracket, byId)
 
-  // The placeable pool = every real dupla. Padding W.O. slots are filled with the sentinel,
-  // so the operator can drop a dupla into any vaga without worrying about swaps.
   const realDuplas = state.duplas
-  const startEdit = () => {
-    const arr = []
-    bracket.rounds[0].forEach((m) => {
-      arr.push(realById[m.dupAId] ? m.dupAId : WO_SENTINEL)
-      arr.push(realById[m.dupBId] ? m.dupBId : WO_SENTINEL)
-    })
-    setSeed(arr)
-  }
-  const cancelEdit = () => setSeed(null)
-  // Free assignment: just drop the chosen dupla (or W.O.) into the slot. Duplicates are
-  // allowed transiently and flagged by validation below; save stays blocked until clean.
-  const assignSlot = (pos, id) => setSeed((prev) => prev.map((v, i) => (i === pos ? id : v)))
+  const phaseLabels = bracket.rounds.map((_, i) => roundLabel(bracket, i))
+  const phaseCount = bracket.rounds.length
 
-  // Validate the working seed: every real dupla must sit in exactly one vaga; the rest are
-  // W.O. A dupla placed twice (or left out) blocks save and is flagged in the UI.
-  const counts = {}
-  ;(seed || []).forEach((v) => {
-    if (v !== WO_SENTINEL) counts[v] = (counts[v] || 0) + 1
-  })
-  const duplicateIds = new Set(Object.keys(counts).filter((id) => counts[id] > 1))
-  const missing = realDuplas.filter((d) => !counts[d.id])
-  const seedValid = duplicateIds.size === 0 && missing.length === 0
+  // Map a stored dupla id to its editor slot value (real id / WO_SENTINEL / EMPTY).
+  const slotVal = (id) => (id == null ? EMPTY : realById[id] ? id : WO_SENTINEL)
+
+  const startEdit = () => {
+    const matches = []
+    bracket.rounds.forEach((round, ri) =>
+      round.forEach((m) =>
+        matches.push({
+          id: m.id,
+          phase: ri,
+          a: slotVal(m.dupAId),
+          b: slotVal(m.dupBId),
+          winnerId: m.winnerId,
+        }),
+      ),
+    )
+    const tp = bracket.thirdPlace
+    const third = tp
+      ? { id: tp.id, a: slotVal(tp.dupAId), b: slotVal(tp.dupBId), winnerId: tp.winnerId }
+      : null
+    setDraft({ matches, third })
+  }
+  const cancelEdit = () => setDraft(null)
+
+  const setSlot = (id, side, val) =>
+    setDraft((d) => ({
+      ...d,
+      matches: d.matches.map((m) => (m.id === id ? { ...m, [side]: val } : m)),
+    }))
+  const setPhase = (id, phase) =>
+    setDraft((d) => ({
+      ...d,
+      matches: d.matches.map((m) => (m.id === id ? { ...m, phase } : m)),
+    }))
+  const setThirdSlot = (side, val) =>
+    setDraft((d) => ({ ...d, third: { ...d.third, [side]: val } }))
+
+  // ---- Validation over the working draft -------------------------------------------
+  // A real dupla may sit in different phases (it won and advanced), but not twice in the
+  // SAME phase, and never against itself. Empty / W.O. slots are unlimited.
+  const conflicts = new Set() // `${matchId}:${side}` — dupla repeated within its phase
+  const selfMatches = new Set() // matchId — same dupla on both sides
+  let unplaced = []
+  if (draft) {
+    for (let pi = 0; pi < phaseCount; pi++) {
+      const slots = []
+      draft.matches
+        .filter((m) => m.phase === pi)
+        .forEach((m) => {
+          slots.push([m.id, 'a', m.a])
+          slots.push([m.id, 'b', m.b])
+        })
+      const cnt = {}
+      slots.forEach(([, , v]) => {
+        if (v && v !== WO_SENTINEL) cnt[v] = (cnt[v] || 0) + 1
+      })
+      slots.forEach(([id, side, v]) => {
+        if (v && v !== WO_SENTINEL && cnt[v] > 1) conflicts.add(`${id}:${side}`)
+      })
+    }
+    const isSelf = (a, b) => a && b && a !== WO_SENTINEL && a === b
+    draft.matches.forEach((m) => isSelf(m.a, m.b) && selfMatches.add(m.id))
+    if (draft.third && isSelf(draft.third.a, draft.third.b)) selfMatches.add(draft.third.id)
+
+    const placed = new Set()
+    const note = (v) => v && v !== WO_SENTINEL && placed.add(v)
+    draft.matches.forEach((m) => (note(m.a), note(m.b)))
+    if (draft.third) (note(draft.third.a), note(draft.third.b))
+    unplaced = realDuplas.filter((d) => !placed.has(d.id))
+  }
+  const seedValid = draft && conflicts.size === 0 && selfMatches.size === 0
 
   const saveEdit = () => {
     if (!seedValid) return
-    // Re-seeding wipes every downstream result + the live placar. Warn first when
-    // there are real games already played (operator chose to keep editing unlocked).
+    // Reuse the bracket's existing W.O. ids for emptied byes; mint fresh ones only if short.
+    const woPool = []
+    const harvestWO = (id) => {
+      if (id != null && !realById[id]) woPool.push(id)
+    }
+    bracket.rounds.forEach((r) => r.forEach((m) => (harvestWO(m.dupAId), harvestWO(m.dupBId))))
+    if (bracket.thirdPlace) {
+      harvestWO(bracket.thirdPlace.dupAId)
+      harvestWO(bracket.thirdPlace.dupBId)
+    }
+    const toId = (v) =>
+      v === EMPTY || v == null ? null : v !== WO_SENTINEL ? v : woPool.shift() || uid('wo')
+
+    const draftRounds = Array.from({ length: phaseCount }, () => [])
+    draft.matches.forEach((m) => {
+      draftRounds[m.phase].push({
+        id: m.id,
+        dupAId: toId(m.a),
+        dupBId: toId(m.b),
+        winnerId: m.winnerId,
+      })
+    })
+    const draftThird = draft.third
+      ? {
+          dupAId: toId(draft.third.a),
+          dupBId: toId(draft.third.b),
+          winnerId: draft.third.winnerId,
+        }
+      : null
+
+    const liveEdited = state.currentMatchId != null
     if (
-      played &&
       !window.confirm(
-        'Salvar refaz a 1ª rodada e APAGA todos os resultados já jogados, ' +
-          'o placar atual e a disputa de 3º lugar. O ranking histórico é mantido. Continuar?',
+        'Salvar deixa o chaveamento manual: os vencedores não avançam mais sozinhos — você monta ' +
+          'cada fase. ' +
+          (liveEdited ? 'A partida atual no placar será encerrada. ' : '') +
+          'Resultados de confrontos cujas duplas mudaram serão limpos. O ranking histórico é ' +
+          'mantido. Continuar?',
       )
     )
       return
-    // Map each W.O. sentinel to a concrete bye id — reuse the bracket's existing W.O. ids,
-    // minting fresh ones (registered as W.O. in byId) only if we somehow run short.
-    const woPool = []
-    bracket.rounds[0].forEach((m) => {
-      if (m.dupAId != null && !realById[m.dupAId]) woPool.push(m.dupAId)
-      if (m.dupBId != null && !realById[m.dupBId]) woPool.push(m.dupBId)
-    })
-    const byIdSave = { ...byId }
-    const slots = seed.map((v) => {
-      if (v !== WO_SENTINEL) return v
-      const id = woPool.shift() || uid('wo')
-      byIdSave[id] = { id, name: 'W.O.', isWO: true }
-      return id
-    })
-    const newBracket = reseedRound0(bracket, byIdSave, slots)
+
+    const { bracket: newBracket, champion: newChampion } = applyManualEdit(
+      bracket,
+      draftRounds,
+      draftThird,
+    )
     setState((s) => ({
       ...s,
       bracket: newBracket,
-      champion: null,
+      champion: newChampion,
       currentMatchId: null,
       cups: { left: CUPS_PER_TEAM, right: CUPS_PER_TEAM },
       undoStack: [],
     }))
-    setSeed(null)
+    setDraft(null)
   }
 
   const iniciar = (matchId) => {
@@ -156,17 +228,17 @@ export default function Bracket({ ctx }) {
         <SectionHead
           kicker="PASSO 2"
           title="Chaveamento"
-          sub={`Mata-mata de ${bracket.size} duplas. Toque em INICIAR JOGO na partida liberada.`}
+          sub={
+            bracket.manual
+              ? `Chaveamento manual de ${bracket.size} duplas. Você controla cada fase — edite à vontade.`
+              : `Mata-mata de ${bracket.size} duplas. Toque em INICIAR JOGO na partida liberada.`
+          }
         />
         <div className="mt-1 shrink-0 flex items-center gap-2">
           {!editing && (
             <button
               onClick={startEdit}
-              title={
-                played
-                  ? 'Editar a 1ª rodada apaga os resultados já jogados (confirma antes de salvar).'
-                  : undefined
-              }
+              title="Edite os confrontos e mova-os entre as fases. Ao salvar, o chaveamento vira manual."
               className="flex items-center gap-1.5 rounded-lg border border-linha bg-mata-2
                          px-3 py-2 font-mono text-xs text-gelo/50 hover:text-dourado hover:border-dourado/50 transition"
             >
@@ -194,12 +266,16 @@ export default function Bracket({ ctx }) {
 
       {editing && (
         <EditPanel
-          seed={seed}
+          draft={draft}
           realDuplas={realDuplas}
-          duplicateIds={duplicateIds}
-          missing={missing}
+          phaseLabels={phaseLabels}
+          conflicts={conflicts}
+          selfMatches={selfMatches}
+          unplaced={unplaced}
           valid={seedValid}
-          assignSlot={assignSlot}
+          setSlot={setSlot}
+          setPhase={setPhase}
+          setThirdSlot={setThirdSlot}
           onSave={saveEdit}
           onCancel={cancelEdit}
         />
@@ -288,50 +364,104 @@ function ThirdPlaceColumn({ tp, nameOf, isWO, live, isNext, onIniciar }) {
   )
 }
 
-// Round-0 seeding editor. Each slot is a <select> over the full pool of duplas (plus a free
-// W.O. vaga), so the operator builds any matchup by hand. Each dupla must sit in exactly one
-// vaga; duplicates / missing duplas are flagged and block save until resolved.
-function EditPanel({ seed, realDuplas, duplicateIds, missing, valid, assignSlot, onSave, onCancel }) {
-  const matchCount = seed.length / 2
+// Full bracket editor. Every phase is shown; each match exposes a phase selector (move
+// it between fases) and two slot <select>s over the dupla pool (plus free W.O. / Vazio).
+// The 3rd-place dispute is editable too. Validation flags same-phase duplicates and
+// self-matches and blocks save until clean.
+function EditPanel({
+  draft,
+  realDuplas,
+  phaseLabels,
+  conflicts,
+  selfMatches,
+  unplaced,
+  valid,
+  setSlot,
+  setPhase,
+  setThirdSlot,
+  onSave,
+  onCancel,
+}) {
   return (
-    <div className="rounded-xl border border-dourado/60 bg-mata-2 p-4 space-y-4">
+    <div className="rounded-xl border border-dourado/60 bg-mata-2 p-4 space-y-5">
       <div className="flex items-center gap-2 font-display text-lg text-dourado">
-        <ArrowLeftRight size={18} /> Montar confrontos — 1ª rodada
+        <ArrowLeftRight size={18} /> Editar chaveamento — todas as fases
       </div>
       <p className="font-mono text-xs text-gelo/50">
-        Escolha livremente quem joga em cada vaga. Cada dupla entra uma única vez; preencha as
-        vagas restantes com W.O. Salvar recalcula o restante do chaveamento.
+        Monte qualquer confronto em qualquer fase e mova confrontos entre fases pelo seletor
+        FASE. Ao salvar, o chaveamento passa a ser manual: os vencedores não avançam sozinhos —
+        você define cada fase.
       </p>
-      {!valid && (
+      {(conflicts.size > 0 || selfMatches.size > 0) && (
         <div className="rounded-lg border border-copo/60 bg-copo/10 px-3 py-2 font-mono text-xs text-copo space-y-1">
-          {duplicateIds.size > 0 && <div>Há dupla repetida em mais de um confronto.</div>}
-          {missing.length > 0 && (
-            <div>Faltam posicionar: {missing.map((d) => d.name).join(', ')}.</div>
-          )}
+          {conflicts.size > 0 && <div>Há dupla repetida na mesma fase.</div>}
+          {selfMatches.size > 0 && <div>Há confronto com a mesma dupla nos dois lados.</div>}
         </div>
       )}
-      <div className="grid gap-3 sm:grid-cols-2">
-        {Array.from({ length: matchCount }, (_, i) => (
-          <div key={i} className="rounded-lg border border-linha bg-mata p-3 space-y-2">
-            <div className="font-mono text-[10px] tracking-widest text-gelo/40">
-              CONFRONTO {i + 1}
-            </div>
-            <SlotSelect
-              value={seed[i * 2]}
-              realDuplas={realDuplas}
-              conflict={duplicateIds.has(seed[i * 2])}
-              onChange={(id) => assignSlot(i * 2, id)}
-            />
-            <div className="text-center font-display text-xs text-copo">VS</div>
-            <SlotSelect
-              value={seed[i * 2 + 1]}
-              realDuplas={realDuplas}
-              conflict={duplicateIds.has(seed[i * 2 + 1])}
-              onChange={(id) => assignSlot(i * 2 + 1, id)}
-            />
+      {unplaced.length > 0 && (
+        <div className="rounded-lg border border-linha bg-mata px-3 py-2 font-mono text-xs text-gelo/50">
+          Fora do chaveamento: {unplaced.map((d) => d.name).join(', ')}.
+        </div>
+      )}
+
+      {phaseLabels.map((label, pi) => {
+        const ms = draft.matches.filter((m) => m.phase === pi)
+        return (
+          <div key={pi} className="space-y-2">
+            <h4 className="font-display text-base text-gelo/80">{label}</h4>
+            {ms.length === 0 ? (
+              <p className="font-mono text-[11px] text-gelo/30">Sem confrontos nesta fase.</p>
+            ) : (
+              <div className="grid gap-3 sm:grid-cols-2">
+                {ms.map((m) => (
+                  <MatchEditor
+                    key={m.id}
+                    m={m}
+                    realDuplas={realDuplas}
+                    phaseLabels={phaseLabels}
+                    selfMatch={selfMatches.has(m.id)}
+                    conflictA={conflicts.has(`${m.id}:a`)}
+                    conflictB={conflicts.has(`${m.id}:b`)}
+                    onPhase={(p) => setPhase(m.id, p)}
+                    onA={(v) => setSlot(m.id, 'a', v)}
+                    onB={(v) => setSlot(m.id, 'b', v)}
+                  />
+                ))}
+              </div>
+            )}
           </div>
-        ))}
-      </div>
+        )
+      })}
+
+      {draft.third && (
+        <div className="space-y-2">
+          <h4 className="font-display text-base text-gelo/80">3º Lugar</h4>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div
+              className={[
+                'rounded-lg border bg-mata p-3 space-y-2',
+                selfMatches.has(draft.third.id) ? 'border-copo' : 'border-linha',
+              ].join(' ')}
+            >
+              <div className="font-mono text-[10px] tracking-widest text-gelo/40">DISPUTA DE 3º</div>
+              <SlotSelect
+                value={draft.third.a}
+                realDuplas={realDuplas}
+                conflict={selfMatches.has(draft.third.id)}
+                onChange={(v) => setThirdSlot('a', v)}
+              />
+              <div className="text-center font-display text-xs text-copo">VS</div>
+              <SlotSelect
+                value={draft.third.b}
+                realDuplas={realDuplas}
+                conflict={selfMatches.has(draft.third.id)}
+                onChange={(v) => setThirdSlot('b', v)}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="flex items-center justify-end gap-2">
         <button
           onClick={onCancel}
@@ -357,6 +487,40 @@ function EditPanel({ seed, realDuplas, duplicateIds, missing, valid, assignSlot,
   )
 }
 
+// One editable confronto: a FASE selector (move between phases) + the two slot selects.
+function MatchEditor({ m, realDuplas, phaseLabels, selfMatch, conflictA, conflictB, onPhase, onA, onB }) {
+  return (
+    <div
+      className={[
+        'rounded-lg border bg-mata p-3 space-y-2',
+        selfMatch ? 'border-copo' : 'border-linha',
+      ].join(' ')}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-mono text-[10px] tracking-widest text-gelo/40">CONFRONTO</span>
+        <label className="flex items-center gap-1.5 font-mono text-[10px] tracking-widest text-gelo/40">
+          FASE
+          <select
+            value={m.phase}
+            onChange={(e) => onPhase(Number(e.target.value))}
+            className="rounded border border-linha bg-mata-2 px-1.5 py-1 font-sans text-xs text-gelo
+                       focus:outline-none focus:border-dourado"
+          >
+            {phaseLabels.map((lab, i) => (
+              <option key={i} value={i}>
+                {lab}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <SlotSelect value={m.a} realDuplas={realDuplas} conflict={conflictA || selfMatch} onChange={onA} />
+      <div className="text-center font-display text-xs text-copo">VS</div>
+      <SlotSelect value={m.b} realDuplas={realDuplas} conflict={conflictB || selfMatch} onChange={onB} />
+    </div>
+  )
+}
+
 function SlotSelect({ value, realDuplas, conflict, onChange }) {
   return (
     <select
@@ -367,6 +531,7 @@ function SlotSelect({ value, realDuplas, conflict, onChange }) {
         conflict ? 'border-copo focus:border-copo' : 'border-linha focus:border-dourado',
       ].join(' ')}
     >
+      <option value={EMPTY}>— Vazio —</option>
       {realDuplas.map((d) => (
         <option key={d.id} value={d.id}>
           {d.name}

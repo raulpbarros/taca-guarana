@@ -133,6 +133,7 @@ function resolveByes(bracket, byId) {
 // Place a winner into the next round's feeding slot. Mutates bracket.
 function setWinner(bracket, match, winnerId) {
   match.winnerId = winnerId
+  if (bracket.manual) return // manual bracket: operator advances winners by hand
   if (match.isThird) return // standalone — feeds nothing
   const next = bracket.rounds[match.round + 1]
   if (!next) return // final
@@ -182,12 +183,21 @@ export function recordResult(bracket, byId, matchId, winnerId) {
   const m = findMatch(clone, matchId)
   if (!m) return { bracket, champion: null }
   setWinner(clone, m, winnerId)
-  resolveByes(clone, byId)
-  resolveThirdPlace(clone, byId)
+  // Manual brackets are operator-driven: winners don't cascade and byes / 3rd place
+  // aren't auto-filled — the operator builds every phase by hand.
+  if (!clone.manual) {
+    resolveByes(clone, byId)
+    resolveThirdPlace(clone, byId)
+  }
+  return { bracket: clone, champion: championOf(clone) }
+}
 
-  const finalRound = clone.rounds[clone.rounds.length - 1]
-  const champion = finalRound[0]?.winnerId || null
-  return { bracket: clone, champion }
+// Champion = winner of the final phase, but only when that phase is a single decided
+// match. A manual edit can leave the final ambiguous (0 or >1 matches) — then no champion.
+export function championOf(bracket) {
+  const finalRound = bracket.rounds[bracket.rounds.length - 1]
+  if (finalRound && finalRound.length === 1) return finalRound[0].winnerId || null
+  return null
 }
 
 // True once any *real* match (both sides non-W.O.) has a recorded winner — i.e. the
@@ -201,34 +211,40 @@ export function hasPlayedMatch(bracket, byId) {
   return false
 }
 
-// Re-seed round 0 from a fresh slot list and rebuild everything downstream. `slots` is the
-// ordered dupla-id list for round 0 (match i takes slots[2i] vs slots[2i+1]). Clears all
-// winners + feeds in later rounds, re-seeds round 0, then re-resolves W.O. byes.
-export function reseedRound0(bracket, byId, slots) {
+// Apply a full manual edit of the whole bracket. `draftRounds` is the new phase→matches
+// structure (phase index = position; each match: { id, dupAId, dupBId, winnerId }), and
+// `draftThird` the optional 3rd-place match. Flags the bracket `manual` so winners stop
+// auto-advancing — the operator now owns every phase. A preserved winner is dropped when
+// its dupla is no longer one of the two sides (duplas were edited under it).
+export function applyManualEdit(bracket, draftRounds, draftThird) {
   const clone = structuredClone(bracket)
-  clone.rounds.forEach((round, ri) => {
-    round.forEach((m) => {
-      m.winnerId = null
-      if (ri > 0) {
-        m.dupAId = null
-        m.dupBId = null
+  clone.manual = true
+  const keepWinner = (w, a, b) => (w && (w === a || w === b) ? w : null)
+  clone.rounds = draftRounds.map((round, ri) =>
+    round.map((m, si) => {
+      const dupAId = m.dupAId ?? null
+      const dupBId = m.dupBId ?? null
+      return {
+        id: m.id,
+        round: ri,
+        slot: si,
+        dupAId,
+        dupBId,
+        winnerId: keepWinner(m.winnerId, dupAId, dupBId),
       }
-    })
-  })
-  clone.rounds[0].forEach((m, i) => {
-    m.dupAId = slots[i * 2] ?? null
-    m.dupBId = slots[i * 2 + 1] ?? null
-  })
-  if (clone.thirdPlace) {
-    clone.thirdPlace.winnerId = null
-    clone.thirdPlace.dupAId = null
-    clone.thirdPlace.dupBId = null
-  } else {
-    clone.thirdPlace = makeThirdPlace() // brackets created before this feature
+    }),
+  )
+  if (draftThird) {
+    const a = draftThird.dupAId ?? null
+    const b = draftThird.dupBId ?? null
+    clone.thirdPlace = {
+      ...(clone.thirdPlace || makeThirdPlace()),
+      dupAId: a,
+      dupBId: b,
+      winnerId: keepWinner(draftThird.winnerId, a, b),
+    }
   }
-  resolveByes(clone, byId)
-  resolveThirdPlace(clone, byId)
-  return clone
+  return { bracket: clone, champion: championOf(clone) }
 }
 
 export const ROUND_NAMES = {
