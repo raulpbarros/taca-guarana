@@ -149,6 +149,39 @@ export function recordResult(bracket, byId, matchId, winnerId) {
   return { bracket: clone, champion }
 }
 
+// True once any *real* match (both sides non-W.O.) has a recorded winner — i.e. the
+// operator has actually played a game. Re-seeding after that would wipe results, so the
+// UI uses this to lock editing.
+export function hasPlayedMatch(bracket, byId) {
+  if (!bracket) return false
+  for (const round of bracket.rounds)
+    for (const m of round)
+      if (m.winnerId && !isWOId(byId, m.dupAId) && !isWOId(byId, m.dupBId)) return true
+  return false
+}
+
+// Re-seed round 0 from a fresh slot list and rebuild everything downstream. `slots` is the
+// ordered dupla-id list for round 0 (match i takes slots[2i] vs slots[2i+1]). Clears all
+// winners + feeds in later rounds, re-seeds round 0, then re-resolves W.O. byes.
+export function reseedRound0(bracket, byId, slots) {
+  const clone = structuredClone(bracket)
+  clone.rounds.forEach((round, ri) => {
+    round.forEach((m) => {
+      m.winnerId = null
+      if (ri > 0) {
+        m.dupAId = null
+        m.dupBId = null
+      }
+    })
+  })
+  clone.rounds[0].forEach((m, i) => {
+    m.dupAId = slots[i * 2] ?? null
+    m.dupBId = slots[i * 2 + 1] ?? null
+  })
+  resolveByes(clone, byId)
+  return clone
+}
+
 export const ROUND_NAMES = {
   // keyed by remaining rounds-from-end
   1: 'Final',

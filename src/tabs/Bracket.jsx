@@ -1,15 +1,25 @@
 // Chaveamento — single-elimination bracket (4/8/16). Ready match shows "INICIAR
 // JOGO", future matches locked, winners highlighted. See CLAUDE.md §4B.
-import { useEffect, useRef } from 'react'
-import { Play, Lock, Crown, RotateCcw } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Play, Lock, Crown, RotateCcw, Pencil, Check, X, ArrowLeftRight } from 'lucide-react'
 import { SectionHead } from './Setup.jsx'
-import { CUPS_PER_TEAM, roundLabel, nextPlayableMatch } from '../engine.js'
+import {
+  CUPS_PER_TEAM,
+  roundLabel,
+  nextPlayableMatch,
+  hasPlayedMatch,
+  reseedRound0,
+} from '../engine.js'
 
 export default function Bracket({ ctx }) {
   const { state, setState, go, resetTournament } = ctx
   const { bracket, champion } = state
   const edition = state.tournamentName?.trim()
   const nextRef = useRef(null)
+  // Edit mode: a local working copy of the round-0 slot list (length = bracket.size).
+  // Slot p maps to match Math.floor(p/2), side A if even / B if odd.
+  const [seed, setSeed] = useState(null)
+  const editing = seed != null
 
   const onReset = () => {
     if (
@@ -42,8 +52,45 @@ export default function Bracket({ ctx }) {
   const byId = Object.fromEntries(state.duplas.map((d) => [d.id, d]))
   const nameOf = (id) => byId[id]?.name || '—'
   const isWO = (id) => id == null || byId[id]?.isWO
+  // W.O. slot duplas aren't kept in state.duplas, so byId misses them. Label by intent.
+  const slotName = (id) => byId[id]?.name || (id ? 'W.O.' : 'Vazio')
   // The single match the operator should play next (used to highlight + scroll).
   const nextId = nextPlayableMatch(bracket, byId)?.id ?? null
+  // Re-seeding wipes downstream results, so only allow it before any real game is played.
+  const played = hasPlayedMatch(bracket, byId)
+
+  const startEdit = () => {
+    const arr = []
+    bracket.rounds[0].forEach((m) => {
+      arr.push(m.dupAId)
+      arr.push(m.dupBId)
+    })
+    setSeed(arr)
+  }
+  const cancelEdit = () => setSeed(null)
+  // Pick a dupla for slot `pos`. If it already sits elsewhere, swap the two slots so the
+  // real-dupla / W.O. counts stay intact (operator can only rearrange, never duplicate).
+  const assignSlot = (pos, nextId) => {
+    setSeed((prev) => {
+      const next = [...prev]
+      const q = next.indexOf(nextId)
+      if (q === -1) next[pos] = nextId
+      else [next[pos], next[q]] = [next[q], next[pos]]
+      return next
+    })
+  }
+  const saveEdit = () => {
+    const newBracket = reseedRound0(bracket, byId, seed)
+    setState((s) => ({
+      ...s,
+      bracket: newBracket,
+      champion: null,
+      currentMatchId: null,
+      cups: { left: CUPS_PER_TEAM, right: CUPS_PER_TEAM },
+      undoStack: [],
+    }))
+    setSeed(null)
+  }
 
   const iniciar = (matchId) => {
     setState((s) => ({
@@ -63,13 +110,33 @@ export default function Bracket({ ctx }) {
           title="Chaveamento"
           sub={`Mata-mata de ${bracket.size} duplas. Toque em INICIAR JOGO na partida liberada.`}
         />
-        <button
-          onClick={onReset}
-          className="mt-1 shrink-0 flex items-center gap-1.5 rounded-lg border border-linha bg-mata-2
-                     px-3 py-2 font-mono text-xs text-gelo/50 hover:text-copo hover:border-copo/50 transition"
-        >
-          <RotateCcw size={14} /> Reiniciar
-        </button>
+        <div className="mt-1 shrink-0 flex items-center gap-2">
+          {!editing && !played && (
+            <button
+              onClick={startEdit}
+              className="flex items-center gap-1.5 rounded-lg border border-linha bg-mata-2
+                         px-3 py-2 font-mono text-xs text-gelo/50 hover:text-dourado hover:border-dourado/50 transition"
+            >
+              <Pencil size={14} /> Editar
+            </button>
+          )}
+          {!editing && played && (
+            <span
+              title="Edição travada: já existe partida jogada. Reinicie para refazer o chaveamento."
+              className="flex items-center gap-1.5 rounded-lg border border-linha bg-mata-2
+                         px-3 py-2 font-mono text-xs text-gelo/25 cursor-not-allowed"
+            >
+              <Lock size={14} /> Editar
+            </span>
+          )}
+          <button
+            onClick={onReset}
+            className="flex items-center gap-1.5 rounded-lg border border-linha bg-mata-2
+                       px-3 py-2 font-mono text-xs text-gelo/50 hover:text-copo hover:border-copo/50 transition"
+          >
+            <RotateCcw size={14} /> Reiniciar
+          </button>
+        </div>
       </div>
 
       {champion && (
@@ -81,7 +148,17 @@ export default function Bracket({ ctx }) {
         />
       )}
 
-      <div className="flex gap-5 overflow-x-auto pb-4">
+      {editing && (
+        <EditPanel
+          seed={seed}
+          slotName={slotName}
+          assignSlot={assignSlot}
+          onSave={saveEdit}
+          onCancel={cancelEdit}
+        />
+      )}
+
+      <div className={['flex gap-5 overflow-x-auto pb-4', editing ? 'hidden' : ''].join(' ')}>
         {bracket.rounds.map((round, ri) => (
           <div key={ri} className="shrink-0 w-64 flex flex-col">
             <h3 className="font-display text-lg text-dourado mb-3 text-center">
@@ -120,6 +197,79 @@ export default function Bracket({ ctx }) {
         ))}
       </div>
     </div>
+  )
+}
+
+// Round-0 seeding editor. Each slot is a <select> over the same pool of duplas; picking a
+// dupla that already sits in another slot swaps the two, so the operator only rearranges.
+function EditPanel({ seed, slotName, assignSlot, onSave, onCancel }) {
+  const pool = [...new Set(seed)] // unique slot occupants (duplas + W.O.)
+  const matchCount = seed.length / 2
+  return (
+    <div className="rounded-xl border border-dourado/60 bg-mata-2 p-4 space-y-4">
+      <div className="flex items-center gap-2 font-display text-lg text-dourado">
+        <ArrowLeftRight size={18} /> Editar confrontos — 1ª rodada
+      </div>
+      <p className="font-mono text-xs text-gelo/50">
+        Escolha quem joga em cada vaga. Selecionar uma dupla já posicionada troca as duas de
+        lugar. Confira antes de salvar — salvar recalcula o restante do chaveamento.
+      </p>
+      <div className="grid gap-3 sm:grid-cols-2">
+        {Array.from({ length: matchCount }, (_, i) => (
+          <div key={i} className="rounded-lg border border-linha bg-mata p-3 space-y-2">
+            <div className="font-mono text-[10px] tracking-widest text-gelo/40">
+              CONFRONTO {i + 1}
+            </div>
+            <SlotSelect
+              value={seed[i * 2]}
+              pool={pool}
+              slotName={slotName}
+              onChange={(id) => assignSlot(i * 2, id)}
+            />
+            <div className="text-center font-display text-xs text-copo">VS</div>
+            <SlotSelect
+              value={seed[i * 2 + 1]}
+              pool={pool}
+              slotName={slotName}
+              onChange={(id) => assignSlot(i * 2 + 1, id)}
+            />
+          </div>
+        ))}
+      </div>
+      <div className="flex items-center justify-end gap-2">
+        <button
+          onClick={onCancel}
+          className="flex items-center gap-1.5 rounded-lg border border-gelo/30 px-4 py-2
+                     font-bold text-gelo hover:border-gelo/60 transition"
+        >
+          <X size={16} /> Cancelar
+        </button>
+        <button
+          onClick={onSave}
+          className="flex items-center gap-1.5 rounded-lg bg-dourado px-4 py-2 font-bold
+                     text-mata hover:brightness-105"
+        >
+          <Check size={16} /> Salvar chaveamento
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function SlotSelect({ value, pool, slotName, onChange }) {
+  return (
+    <select
+      value={value ?? ''}
+      onChange={(e) => onChange(e.target.value)}
+      className="w-full rounded-lg border border-linha bg-mata-2 px-3 py-2 font-medium text-gelo
+                 focus:border-dourado focus:outline-none"
+    >
+      {pool.map((id) => (
+        <option key={id ?? 'empty'} value={id ?? ''}>
+          {slotName(id)}
+        </option>
+      ))}
+    </select>
   )
 }
 
