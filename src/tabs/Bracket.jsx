@@ -5,11 +5,16 @@ import { Play, Lock, Crown, RotateCcw, Pencil, Check, X, ArrowLeftRight } from '
 import { SectionHead } from './Setup.jsx'
 import {
   CUPS_PER_TEAM,
+  uid,
   roundLabel,
   nextPlayableMatch,
   hasPlayedMatch,
   reseedRound0,
 } from '../engine.js'
+
+// Sentinel value for an empty/bye slot in the seeding editor. Real slots hold a dupla id;
+// every other slot is a free W.O. vaga that the operator can place anywhere.
+const WO_SENTINEL = '__wo__'
 
 export default function Bracket({ ctx }) {
   const { state, setState, go, resetTournament } = ctx
@@ -49,37 +54,56 @@ export default function Bracket({ ctx }) {
     )
   }
 
-  const byId = Object.fromEntries(state.duplas.map((d) => [d.id, d]))
+  // Padding W.O. duplas (byes) aren't kept in state.duplas — they only live inside the
+  // bracket as ids. Synthesize them here so isWO / bye-resolution work everywhere, including
+  // after a re-seed (otherwise resolveByes wouldn't recognize a bye and it'd show as a real
+  // opponent named "W.O.").
+  const realById = Object.fromEntries(state.duplas.map((d) => [d.id, d]))
+  const byId = { ...realById }
+  const addWO = (id) => {
+    if (id != null && !byId[id]) byId[id] = { id, name: 'W.O.', isWO: true }
+  }
+  bracket.rounds.forEach((r) => r.forEach((m) => (addWO(m.dupAId), addWO(m.dupBId))))
+  if (bracket.thirdPlace) {
+    addWO(bracket.thirdPlace.dupAId)
+    addWO(bracket.thirdPlace.dupBId)
+  }
   const nameOf = (id) => byId[id]?.name || '—'
   const isWO = (id) => id == null || byId[id]?.isWO
-  // W.O. slot duplas aren't kept in state.duplas, so byId misses them. Label by intent.
   const slotName = (id) => byId[id]?.name || (id ? 'W.O.' : 'Vazio')
   // The single match the operator should play next (used to highlight + scroll).
   const nextId = nextPlayableMatch(bracket, byId)?.id ?? null
   // Re-seeding wipes downstream results, so only allow it before any real game is played.
   const played = hasPlayedMatch(bracket, byId)
 
+  // The placeable pool = every real dupla. Padding W.O. slots are filled with the sentinel,
+  // so the operator can drop a dupla into any vaga without worrying about swaps.
+  const realDuplas = state.duplas
   const startEdit = () => {
     const arr = []
     bracket.rounds[0].forEach((m) => {
-      arr.push(m.dupAId)
-      arr.push(m.dupBId)
+      arr.push(realById[m.dupAId] ? m.dupAId : WO_SENTINEL)
+      arr.push(realById[m.dupBId] ? m.dupBId : WO_SENTINEL)
     })
     setSeed(arr)
   }
   const cancelEdit = () => setSeed(null)
-  // Pick a dupla for slot `pos`. If it already sits elsewhere, swap the two slots so the
-  // real-dupla / W.O. counts stay intact (operator can only rearrange, never duplicate).
-  const assignSlot = (pos, nextId) => {
-    setSeed((prev) => {
-      const next = [...prev]
-      const q = next.indexOf(nextId)
-      if (q === -1) next[pos] = nextId
-      else [next[pos], next[q]] = [next[q], next[pos]]
-      return next
-    })
-  }
+  // Free assignment: just drop the chosen dupla (or W.O.) into the slot. Duplicates are
+  // allowed transiently and flagged by validation below; save stays blocked until clean.
+  const assignSlot = (pos, id) => setSeed((prev) => prev.map((v, i) => (i === pos ? id : v)))
+
+  // Validate the working seed: every real dupla must sit in exactly one vaga; the rest are
+  // W.O. A dupla placed twice (or left out) blocks save and is flagged in the UI.
+  const counts = {}
+  ;(seed || []).forEach((v) => {
+    if (v !== WO_SENTINEL) counts[v] = (counts[v] || 0) + 1
+  })
+  const duplicateIds = new Set(Object.keys(counts).filter((id) => counts[id] > 1))
+  const missing = realDuplas.filter((d) => !counts[d.id])
+  const seedValid = duplicateIds.size === 0 && missing.length === 0
+
   const saveEdit = () => {
+    if (!seedValid) return
     // Re-seeding wipes every downstream result + the live placar. Warn first when
     // there are real games already played (operator chose to keep editing unlocked).
     if (
@@ -90,7 +114,21 @@ export default function Bracket({ ctx }) {
       )
     )
       return
-    const newBracket = reseedRound0(bracket, byId, seed)
+    // Map each W.O. sentinel to a concrete bye id — reuse the bracket's existing W.O. ids,
+    // minting fresh ones (registered as W.O. in byId) only if we somehow run short.
+    const woPool = []
+    bracket.rounds[0].forEach((m) => {
+      if (m.dupAId != null && !realById[m.dupAId]) woPool.push(m.dupAId)
+      if (m.dupBId != null && !realById[m.dupBId]) woPool.push(m.dupBId)
+    })
+    const byIdSave = { ...byId }
+    const slots = seed.map((v) => {
+      if (v !== WO_SENTINEL) return v
+      const id = woPool.shift() || uid('wo')
+      byIdSave[id] = { id, name: 'W.O.', isWO: true }
+      return id
+    })
+    const newBracket = reseedRound0(bracket, byIdSave, slots)
     setState((s) => ({
       ...s,
       bracket: newBracket,
@@ -157,7 +195,10 @@ export default function Bracket({ ctx }) {
       {editing && (
         <EditPanel
           seed={seed}
-          slotName={slotName}
+          realDuplas={realDuplas}
+          duplicateIds={duplicateIds}
+          missing={missing}
+          valid={seedValid}
           assignSlot={assignSlot}
           onSave={saveEdit}
           onCancel={cancelEdit}
@@ -247,20 +288,28 @@ function ThirdPlaceColumn({ tp, nameOf, isWO, live, isNext, onIniciar }) {
   )
 }
 
-// Round-0 seeding editor. Each slot is a <select> over the same pool of duplas; picking a
-// dupla that already sits in another slot swaps the two, so the operator only rearranges.
-function EditPanel({ seed, slotName, assignSlot, onSave, onCancel }) {
-  const pool = [...new Set(seed)] // unique slot occupants (duplas + W.O.)
+// Round-0 seeding editor. Each slot is a <select> over the full pool of duplas (plus a free
+// W.O. vaga), so the operator builds any matchup by hand. Each dupla must sit in exactly one
+// vaga; duplicates / missing duplas are flagged and block save until resolved.
+function EditPanel({ seed, realDuplas, duplicateIds, missing, valid, assignSlot, onSave, onCancel }) {
   const matchCount = seed.length / 2
   return (
     <div className="rounded-xl border border-dourado/60 bg-mata-2 p-4 space-y-4">
       <div className="flex items-center gap-2 font-display text-lg text-dourado">
-        <ArrowLeftRight size={18} /> Editar confrontos — 1ª rodada
+        <ArrowLeftRight size={18} /> Montar confrontos — 1ª rodada
       </div>
       <p className="font-mono text-xs text-gelo/50">
-        Escolha quem joga em cada vaga. Selecionar uma dupla já posicionada troca as duas de
-        lugar. Confira antes de salvar — salvar recalcula o restante do chaveamento.
+        Escolha livremente quem joga em cada vaga. Cada dupla entra uma única vez; preencha as
+        vagas restantes com W.O. Salvar recalcula o restante do chaveamento.
       </p>
+      {!valid && (
+        <div className="rounded-lg border border-copo/60 bg-copo/10 px-3 py-2 font-mono text-xs text-copo space-y-1">
+          {duplicateIds.size > 0 && <div>Há dupla repetida em mais de um confronto.</div>}
+          {missing.length > 0 && (
+            <div>Faltam posicionar: {missing.map((d) => d.name).join(', ')}.</div>
+          )}
+        </div>
+      )}
       <div className="grid gap-3 sm:grid-cols-2">
         {Array.from({ length: matchCount }, (_, i) => (
           <div key={i} className="rounded-lg border border-linha bg-mata p-3 space-y-2">
@@ -269,15 +318,15 @@ function EditPanel({ seed, slotName, assignSlot, onSave, onCancel }) {
             </div>
             <SlotSelect
               value={seed[i * 2]}
-              pool={pool}
-              slotName={slotName}
+              realDuplas={realDuplas}
+              conflict={duplicateIds.has(seed[i * 2])}
               onChange={(id) => assignSlot(i * 2, id)}
             />
             <div className="text-center font-display text-xs text-copo">VS</div>
             <SlotSelect
               value={seed[i * 2 + 1]}
-              pool={pool}
-              slotName={slotName}
+              realDuplas={realDuplas}
+              conflict={duplicateIds.has(seed[i * 2 + 1])}
               onChange={(id) => assignSlot(i * 2 + 1, id)}
             />
           </div>
@@ -293,8 +342,13 @@ function EditPanel({ seed, slotName, assignSlot, onSave, onCancel }) {
         </button>
         <button
           onClick={onSave}
-          className="flex items-center gap-1.5 rounded-lg bg-dourado px-4 py-2 font-bold
-                     text-mata hover:brightness-105"
+          disabled={!valid}
+          className={[
+            'flex items-center gap-1.5 rounded-lg px-4 py-2 font-bold transition',
+            valid
+              ? 'bg-dourado text-mata hover:brightness-105'
+              : 'bg-dourado/30 text-mata/50 cursor-not-allowed',
+          ].join(' ')}
         >
           <Check size={16} /> Salvar chaveamento
         </button>
@@ -303,19 +357,22 @@ function EditPanel({ seed, slotName, assignSlot, onSave, onCancel }) {
   )
 }
 
-function SlotSelect({ value, pool, slotName, onChange }) {
+function SlotSelect({ value, realDuplas, conflict, onChange }) {
   return (
     <select
-      value={value ?? ''}
+      value={value}
       onChange={(e) => onChange(e.target.value)}
-      className="w-full rounded-lg border border-linha bg-mata-2 px-3 py-2 font-medium text-gelo
-                 focus:border-dourado focus:outline-none"
+      className={[
+        'w-full rounded-lg border bg-mata-2 px-3 py-2 font-medium text-gelo focus:outline-none',
+        conflict ? 'border-copo focus:border-copo' : 'border-linha focus:border-dourado',
+      ].join(' ')}
     >
-      {pool.map((id) => (
-        <option key={id ?? 'empty'} value={id ?? ''}>
-          {slotName(id)}
+      {realDuplas.map((d) => (
+        <option key={d.id} value={d.id}>
+          {d.name}
         </option>
       ))}
+      <option value={WO_SENTINEL}>W.O. (vaga livre)</option>
     </select>
   )
 }
