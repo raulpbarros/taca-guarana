@@ -122,10 +122,15 @@ export default function Scoreboard({ ctx }) {
   const winnerSide = cups.left === 0 ? 'right' : cups.right === 0 ? 'left' : null
 
   // Which round is on the table — feeds the VS spine ("SEMIFINAL", "FINAL").
+  const isThirdPlace = state.currentMatchId === state.bracket.thirdPlace?.id
   const roundIdx = state.bracket.rounds.findIndex((r) =>
     r.some((m) => m.id === state.currentMatchId),
   )
-  const phase = roundIdx >= 0 ? roundLabel(state.bracket, roundIdx) : ''
+  const phase = isThirdPlace
+    ? 'Disputa de 3º'
+    : roundIdx >= 0
+      ? roundLabel(state.bracket, roundIdx)
+      : ''
 
   // Lead = who has knocked more of the opponent's cups. Drives the glow + spine.
   const leftProgress = CUPS_PER_TEAM - cups.right
@@ -222,7 +227,9 @@ export default function Scoreboard({ ctx }) {
     )
     // Tournament over → fold this tournament's hits into the all-time MVP table (by name)
     // and archive a durable snapshot to disk (or buffer it until a folder connects).
-    if (champion) {
+    // Guard with !state.champion so finishing the 3rd-place match *after* the final
+    // (champion already set) doesn't double-count MVP hits or re-archive.
+    if (champion && !state.champion) {
       const merged = { ...allTime }
       for (const [pid, hits] of Object.entries(state.stats.byPlayer)) {
         const p = state.players.find((x) => x.id === pid)

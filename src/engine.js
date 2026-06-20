@@ -39,6 +39,39 @@ function makeMatch(round, slot) {
   return { id: uid('m'), round, slot, dupAId: null, dupBId: null, winnerId: null }
 }
 
+// Disputa de 3º lugar: a standalone match (outside the rounds tree) between the two
+// semifinal losers. round/slot are null — it never feeds another match.
+function makeThirdPlace() {
+  return { id: uid('tp'), round: null, slot: null, isThird: true, dupAId: null, dupBId: null, winnerId: null }
+}
+
+// The semifinal round = the round just before the final. Always 2 matches for 4/8/16.
+function semifinalRound(bracket) {
+  return bracket.rounds.length >= 2 ? bracket.rounds[bracket.rounds.length - 2] : null
+}
+
+function loserOf(match) {
+  if (!match.winnerId) return null
+  return match.winnerId === match.dupAId ? match.dupBId : match.dupAId
+}
+
+// Seed the 3rd-place match with both semifinal losers once both semis resolve.
+// Mirrors resolveByes: a W.O. loser auto-hands 3rd place to the real loser.
+function resolveThirdPlace(bracket, byId) {
+  const tp = bracket.thirdPlace
+  if (!tp || tp.winnerId) return
+  const semis = semifinalRound(bracket)
+  if (!semis || semis.length < 2) return
+  const [s1, s2] = semis
+  if (!s1.winnerId || !s2.winnerId) return // wait for both semifinals
+  if (tp.dupAId == null) tp.dupAId = loserOf(s1)
+  if (tp.dupBId == null) tp.dupBId = loserOf(s2)
+  const aWO = isWOId(byId, tp.dupAId)
+  const bWO = isWOId(byId, tp.dupBId)
+  if (aWO && bWO) tp.winnerId = tp.dupAId
+  else if (aWO !== bWO) tp.winnerId = aWO ? tp.dupBId : tp.dupAId
+}
+
 // Build a single-elimination bracket from an ordered dupla list (already shuffled).
 // Pads to the bracket size with W.O. byes, then auto-resolves bye matches.
 export function generateBracket(duplas) {
@@ -64,9 +97,10 @@ export function generateBracket(duplas) {
   const allDuplas = [...real, ...slots.filter((d) => d.isWO)]
   const byId = Object.fromEntries(allDuplas.map((d) => [d.id, d]))
 
-  const bracket = { size, rounds }
+  const bracket = { size, rounds, thirdPlace: makeThirdPlace() }
   // Auto-advance any match that already has a W.O. side, cascading forward.
   resolveByes(bracket, byId)
+  resolveThirdPlace(bracket, byId)
   return { bracket, woDuplas: slots.filter((d) => d.isWO) }
 }
 
@@ -99,6 +133,7 @@ function resolveByes(bracket, byId) {
 // Place a winner into the next round's feeding slot. Mutates bracket.
 function setWinner(bracket, match, winnerId) {
   match.winnerId = winnerId
+  if (match.isThird) return // standalone — feeds nothing
   const next = bracket.rounds[match.round + 1]
   if (!next) return // final
   const nextMatch = next[Math.floor(match.slot / 2)]
@@ -106,16 +141,20 @@ function setWinner(bracket, match, winnerId) {
   else nextMatch.dupBId = winnerId
 }
 
-// First match ready to play: both sides real & known, no winner yet.
+// First match ready to play: both sides real & known, no winner yet. The
+// 3rd-place dispute is offered right before the final (convention).
 export function nextPlayableMatch(bracket, byId) {
   if (!bracket) return null
-  for (const round of bracket.rounds) {
-    for (const m of round) {
-      if (m.winnerId) continue
-      if (m.dupAId == null || m.dupBId == null) continue
-      if (isWOId(byId, m.dupAId) || isWOId(byId, m.dupBId)) continue
-      return m
-    }
+  const playable = (m) =>
+    m &&
+    !m.winnerId &&
+    m.dupAId != null &&
+    m.dupBId != null &&
+    !isWOId(byId, m.dupAId) &&
+    !isWOId(byId, m.dupBId)
+  for (let ri = 0; ri < bracket.rounds.length; ri++) {
+    if (ri === bracket.rounds.length - 1 && playable(bracket.thirdPlace)) return bracket.thirdPlace
+    for (const m of bracket.rounds[ri]) if (playable(m)) return m
   }
   return null
 }
@@ -125,6 +164,7 @@ export function findMatch(bracket, matchId) {
   for (const round of bracket.rounds) {
     for (const m of round) if (m.id === matchId) return m
   }
+  if (bracket.thirdPlace?.id === matchId) return bracket.thirdPlace
   return null
 }
 
@@ -143,6 +183,7 @@ export function recordResult(bracket, byId, matchId, winnerId) {
   if (!m) return { bracket, champion: null }
   setWinner(clone, m, winnerId)
   resolveByes(clone, byId)
+  resolveThirdPlace(clone, byId)
 
   const finalRound = clone.rounds[clone.rounds.length - 1]
   const champion = finalRound[0]?.winnerId || null
@@ -154,9 +195,9 @@ export function recordResult(bracket, byId, matchId, winnerId) {
 // UI uses this to lock editing.
 export function hasPlayedMatch(bracket, byId) {
   if (!bracket) return false
-  for (const round of bracket.rounds)
-    for (const m of round)
-      if (m.winnerId && !isWOId(byId, m.dupAId) && !isWOId(byId, m.dupBId)) return true
+  const realWin = (m) => m.winnerId && !isWOId(byId, m.dupAId) && !isWOId(byId, m.dupBId)
+  for (const round of bracket.rounds) for (const m of round) if (realWin(m)) return true
+  if (bracket.thirdPlace && realWin(bracket.thirdPlace)) return true
   return false
 }
 
@@ -178,7 +219,15 @@ export function reseedRound0(bracket, byId, slots) {
     m.dupAId = slots[i * 2] ?? null
     m.dupBId = slots[i * 2 + 1] ?? null
   })
+  if (clone.thirdPlace) {
+    clone.thirdPlace.winnerId = null
+    clone.thirdPlace.dupAId = null
+    clone.thirdPlace.dupBId = null
+  } else {
+    clone.thirdPlace = makeThirdPlace() // brackets created before this feature
+  }
   resolveByes(clone, byId)
+  resolveThirdPlace(clone, byId)
   return clone
 }
 

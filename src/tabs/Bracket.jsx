@@ -80,6 +80,16 @@ export default function Bracket({ ctx }) {
     })
   }
   const saveEdit = () => {
+    // Re-seeding wipes every downstream result + the live placar. Warn first when
+    // there are real games already played (operator chose to keep editing unlocked).
+    if (
+      played &&
+      !window.confirm(
+        'Salvar refaz a 1ª rodada e APAGA todos os resultados já jogados, ' +
+          'o placar atual e a disputa de 3º lugar. O ranking histórico é mantido. Continuar?',
+      )
+    )
+      return
     const newBracket = reseedRound0(bracket, byId, seed)
     setState((s) => ({
       ...s,
@@ -111,23 +121,19 @@ export default function Bracket({ ctx }) {
           sub={`Mata-mata de ${bracket.size} duplas. Toque em INICIAR JOGO na partida liberada.`}
         />
         <div className="mt-1 shrink-0 flex items-center gap-2">
-          {!editing && !played && (
+          {!editing && (
             <button
               onClick={startEdit}
+              title={
+                played
+                  ? 'Editar a 1ª rodada apaga os resultados já jogados (confirma antes de salvar).'
+                  : undefined
+              }
               className="flex items-center gap-1.5 rounded-lg border border-linha bg-mata-2
                          px-3 py-2 font-mono text-xs text-gelo/50 hover:text-dourado hover:border-dourado/50 transition"
             >
               <Pencil size={14} /> Editar
             </button>
-          )}
-          {!editing && played && (
-            <span
-              title="Edição travada: já existe partida jogada. Reinicie para refazer o chaveamento."
-              className="flex items-center gap-1.5 rounded-lg border border-linha bg-mata-2
-                         px-3 py-2 font-mono text-xs text-gelo/25 cursor-not-allowed"
-            >
-              <Lock size={14} /> Editar
-            </span>
           )}
           <button
             onClick={onReset}
@@ -195,6 +201,47 @@ export default function Bracket({ ctx }) {
             </div>
           </div>
         ))}
+
+        {bracket.thirdPlace && (
+          <ThirdPlaceColumn
+            tp={bracket.thirdPlace}
+            nameOf={nameOf}
+            isWO={isWO}
+            live={state.currentMatchId === bracket.thirdPlace.id}
+            isNext={bracket.thirdPlace.id === nextId && state.currentMatchId !== bracket.thirdPlace.id}
+            onIniciar={() => iniciar(bracket.thirdPlace.id)}
+          />
+        )}
+      </div>
+    </div>
+  )
+}
+
+// Standalone "3º Lugar" match between the two semifinal losers. Same card as the
+// bracket, but its own column (it feeds nothing, so no connector stubs).
+function ThirdPlaceColumn({ tp, nameOf, isWO, live, isNext, onIniciar }) {
+  const aKnown = tp.dupAId != null
+  const bKnown = tp.dupBId != null
+  const ready = !tp.winnerId && aKnown && bKnown && !isWO(tp.dupAId) && !isWO(tp.dupBId)
+  const locked = !tp.winnerId && (!aKnown || !bKnown)
+  return (
+    <div className="shrink-0 w-64 flex flex-col">
+      <h3 className="font-display text-lg text-gelo/70 mb-3 text-center">3º Lugar</h3>
+      <div className="flex flex-col justify-around flex-1 gap-4">
+        <MatchCard
+          hasPrev={false}
+          hasNext={false}
+          aName={nameOf(tp.dupAId)}
+          bName={nameOf(tp.dupBId)}
+          aWin={tp.winnerId && tp.winnerId === tp.dupAId}
+          bWin={tp.winnerId && tp.winnerId === tp.dupBId}
+          decided={!!tp.winnerId}
+          ready={ready}
+          locked={locked}
+          live={live}
+          isNext={isNext}
+          onIniciar={onIniciar}
+        />
       </div>
     </div>
   )
