@@ -44,17 +44,6 @@ body {
   color: var(--color-gelo);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
-  /* Custom ping-pong cursor (40px — under the ~128px browser cap, so it shows). */
-  cursor: url("../assets/cursor-40-40.png") 6 2, auto;
-}
-
-/* Keep the custom cursor over interactive elements too. */
-button,
-a,
-[role="button"],
-summary,
-label {
-  cursor: url("../assets/cursor-40-40.png") 6 2, pointer;
 }
 
 /* Display headers: Anton is caps-only by nature; widen tracking slightly. */
