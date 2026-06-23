@@ -26,6 +26,23 @@ export default function App() {
   const [allTime, setAllTime] = useLocalStorage('tacaGuarana:allTimeMvp', {})
   const history = useHistory()
 
+  // Migrate old single-elim bracket (has `rounds`) to new DE format by resetting the bracket.
+  // Runs once on mount; keeps players and duplas, clears bracket/match/stats.
+  useEffect(() => {
+    if (state.bracket && state.bracket.rounds && !state.bracket.upper) {
+      setState((s) => ({
+        ...s,
+        bracket: null,
+        champion: null,
+        currentMatchId: null,
+        cups: { left: 6, right: 6 },
+        undoStack: [],
+        stats: { byPlayer: {} },
+      }))
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // Kiosk = jumbotron focus mode: hide chrome, Placar fills the screen.
   const [kiosk, setKiosk] = useState(false)
   // Sound + haptic feedback on scoring/win. Persisted so the operator's choice sticks.

@@ -8,10 +8,11 @@ import {
   findMatch,
   recordResult,
   nextPlayableMatch,
-  roundLabel,
+  matchPhaseLabel,
 } from '../engine.js'
 import { buildTournamentRecord } from '../history.js'
 import { playBounce, playWin } from '../sfx.js'
+import { playPointSound, playWinSound } from '../sounds.js'
 import { randomGif } from '../gifs.js'
 
 // On-screen life of a gif. MUST match the taca-gif-pop duration in index.css.
@@ -121,16 +122,8 @@ export default function Scoreboard({ ctx }) {
   const cups = state.cups
   const winnerSide = cups.left === 0 ? 'right' : cups.right === 0 ? 'left' : null
 
-  // Which round is on the table — feeds the VS spine ("SEMIFINAL", "FINAL").
-  const isThirdPlace = state.currentMatchId === state.bracket.thirdPlace?.id
-  const roundIdx = state.bracket.rounds.findIndex((r) =>
-    r.some((m) => m.id === state.currentMatchId),
-  )
-  const phase = isThirdPlace
-    ? 'Disputa de 3º'
-    : roundIdx >= 0
-      ? roundLabel(state.bracket, roundIdx)
-      : ''
+  // Which phase is on the table — feeds the VS spine ("Upper — Final", "Grande Final", …).
+  const phase = matchPhaseLabel(state.bracket, state.currentMatchId)
 
   // Lead = who has knocked more of the opponent's cups. Drives the glow + spine.
   const leftProgress = CUPS_PER_TEAM - cups.right
@@ -153,7 +146,9 @@ export default function Scoreboard({ ctx }) {
     const isWin = prev - 1 === 0
     lastActivity.current = Date.now() // a point dropped — reset the stall clock
     setRecent(`${victimSide}:${CUPS_PER_TEAM - prev}`)
-    if (sfxOn) (isWin ? playWin : playBounce)()
+    if (sfxOn) {
+      if (isWin) { playWin(); playWinSound() } else { playBounce(); playPointSound() }
+    }
 
     // Match-winning cup → celebrate with a win gif (behind the victory modal).
     if (isWin) {

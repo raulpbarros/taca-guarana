@@ -1,34 +1,34 @@
-// Chaveamento — single-elimination bracket (4/8/16). Ready match shows "INICIAR
-// JOGO", future matches locked, winners highlighted. The "Editar" panel is always
-// available and lets the operator rebuild EVERY phase by hand — pick the duplas of
-// any confronto and move confrontos between phases. Saving turns the bracket manual
-// (winners stop auto-advancing; the operator owns each phase). See CLAUDE.md §4B.
+// Chaveamento — double elimination. Fully manual drag & drop seeding.
+// Upper bracket + lower bracket + Grande Final. Operator drags duplas from pool into slots.
 import { useEffect, useRef, useState } from 'react'
-import { Play, Lock, Crown, RotateCcw, Pencil, Check, X, ArrowLeftRight } from 'lucide-react'
+import {
+  Play, Lock, Crown, RotateCcw, Plus, ArrowDown, Trophy, GripVertical,
+} from 'lucide-react'
 import { SectionHead } from './Setup.jsx'
 import {
   CUPS_PER_TEAM,
-  uid,
-  roundLabel,
+  upperRoundLabel,
+  lowerRoundLabel,
   nextPlayableMatch,
-  applyManualEdit,
+  addMatchToRound,
+  addRound,
+  sendLoserToLower,
+  assignDuplaToSlot,
+  swapDuplaSlots,
 } from '../engine.js'
-
-// Slot sentinels for the editor. A real slot holds a dupla id; '' is an empty vaga
-// (Vazio) and WO_SENTINEL a free W.O. bye the operator can drop anywhere.
-const WO_SENTINEL = '__wo__'
-const EMPTY = ''
 
 export default function Bracket({ ctx }) {
   const { state, setState, go, resetTournament } = ctx
   const { bracket, champion } = state
   const edition = state.tournamentName?.trim()
   const nextRef = useRef(null)
-  // Edit mode working copy. null = not editing. Shape:
-  //   { matches: [{ id, phase, a, b, winnerId }], third: { id, a, b, winnerId } | null }
-  // a/b are a dupla id | WO_SENTINEL | EMPTY. `phase` = round index the match sits in.
-  const [draft, setDraft] = useState(null)
-  const editing = draft != null
+
+  // dragState: what is being dragged
+  // { duplaId, fromPool } | { duplaId, fromMatchId, fromSide }
+  const [dragState, setDragState] = useState(null)
+  // dragOver: which slot is being hovered
+  // { matchId, side } | 'pool' | null
+  const [dragOver, setDragOver] = useState(null)
 
   const onReset = () => {
     if (
@@ -40,8 +40,6 @@ export default function Bracket({ ctx }) {
       resetTournament()
   }
 
-  // Bring the next playable match into view whenever the bracket advances, so the
-  // operator never hunts for "what's next" after a result.
   useEffect(() => {
     nextRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' })
   }, [state.bracket, state.currentMatchId, state.champion])
@@ -58,160 +56,34 @@ export default function Bracket({ ctx }) {
     )
   }
 
-  // Padding W.O. duplas (byes) aren't kept in state.duplas — they only live inside the
-  // bracket as ids. Synthesize them here so isWO / naming work everywhere, including after
-  // a manual edit (otherwise a bye would render as a real opponent named "W.O.").
   const realById = Object.fromEntries(state.duplas.map((d) => [d.id, d]))
   const byId = { ...realById }
   const addWO = (id) => {
     if (id != null && !byId[id]) byId[id] = { id, name: 'W.O.', isWO: true }
   }
-  bracket.rounds.forEach((r) => r.forEach((m) => (addWO(m.dupAId), addWO(m.dupBId))))
-  if (bracket.thirdPlace) {
-    addWO(bracket.thirdPlace.dupAId)
-    addWO(bracket.thirdPlace.dupBId)
-  }
+  ;(bracket.upper || []).forEach((r) => r.forEach((m) => (addWO(m.dupAId), addWO(m.dupBId))))
+  ;(bracket.lower || []).forEach((r) => r.forEach((m) => (addWO(m.dupAId), addWO(m.dupBId))))
+  if (bracket.grandFinal) { addWO(bracket.grandFinal.dupAId); addWO(bracket.grandFinal.dupBId) }
+
   const nameOf = (id) => byId[id]?.name || '—'
   const isWO = (id) => id == null || byId[id]?.isWO
-  // The single match the operator should play next (used to highlight + scroll).
   const nextId = nextPlayableMatch(bracket, byId)?.id ?? null
-
   const realDuplas = state.duplas
-  const phaseLabels = bracket.rounds.map((_, i) => roundLabel(bracket, i))
-  const phaseCount = bracket.rounds.length
 
-  // Map a stored dupla id to its editor slot value (real id / WO_SENTINEL / EMPTY).
-  const slotVal = (id) => (id == null ? EMPTY : realById[id] ? id : WO_SENTINEL)
+  // Compute placed dupla IDs across all slots
+  const placedIds = new Set()
+  const noteId = (id) => { if (id && realById[id]) placedIds.add(id) }
+  ;(bracket.upper || []).forEach((r) => r.forEach((m) => (noteId(m.dupAId), noteId(m.dupBId))))
+  ;(bracket.lower || []).forEach((r) => r.forEach((m) => (noteId(m.dupAId), noteId(m.dupBId))))
+  if (bracket.grandFinal) { noteId(bracket.grandFinal.dupAId); noteId(bracket.grandFinal.dupBId) }
 
-  const startEdit = () => {
-    const matches = []
-    bracket.rounds.forEach((round, ri) =>
-      round.forEach((m) =>
-        matches.push({
-          id: m.id,
-          phase: ri,
-          a: slotVal(m.dupAId),
-          b: slotVal(m.dupBId),
-          winnerId: m.winnerId,
-        }),
-      ),
-    )
-    const tp = bracket.thirdPlace
-    const third = tp
-      ? { id: tp.id, a: slotVal(tp.dupAId), b: slotVal(tp.dupBId), winnerId: tp.winnerId }
-      : null
-    setDraft({ matches, third })
-  }
-  const cancelEdit = () => setDraft(null)
+  const lowerDuplaIds = new Set()
+  ;(bracket.lower || []).forEach((r) => r.forEach((m) => {
+    if (m.dupAId) lowerDuplaIds.add(m.dupAId)
+    if (m.dupBId) lowerDuplaIds.add(m.dupBId)
+  }))
 
-  const setSlot = (id, side, val) =>
-    setDraft((d) => ({
-      ...d,
-      matches: d.matches.map((m) => (m.id === id ? { ...m, [side]: val } : m)),
-    }))
-  const setPhase = (id, phase) =>
-    setDraft((d) => ({
-      ...d,
-      matches: d.matches.map((m) => (m.id === id ? { ...m, phase } : m)),
-    }))
-  const setThirdSlot = (side, val) =>
-    setDraft((d) => ({ ...d, third: { ...d.third, [side]: val } }))
-
-  // ---- Validation over the working draft -------------------------------------------
-  // A real dupla may sit in different phases (it won and advanced), but not twice in the
-  // SAME phase, and never against itself. Empty / W.O. slots are unlimited.
-  const conflicts = new Set() // `${matchId}:${side}` — dupla repeated within its phase
-  const selfMatches = new Set() // matchId — same dupla on both sides
-  let unplaced = []
-  if (draft) {
-    for (let pi = 0; pi < phaseCount; pi++) {
-      const slots = []
-      draft.matches
-        .filter((m) => m.phase === pi)
-        .forEach((m) => {
-          slots.push([m.id, 'a', m.a])
-          slots.push([m.id, 'b', m.b])
-        })
-      const cnt = {}
-      slots.forEach(([, , v]) => {
-        if (v && v !== WO_SENTINEL) cnt[v] = (cnt[v] || 0) + 1
-      })
-      slots.forEach(([id, side, v]) => {
-        if (v && v !== WO_SENTINEL && cnt[v] > 1) conflicts.add(`${id}:${side}`)
-      })
-    }
-    const isSelf = (a, b) => a && b && a !== WO_SENTINEL && a === b
-    draft.matches.forEach((m) => isSelf(m.a, m.b) && selfMatches.add(m.id))
-    if (draft.third && isSelf(draft.third.a, draft.third.b)) selfMatches.add(draft.third.id)
-
-    const placed = new Set()
-    const note = (v) => v && v !== WO_SENTINEL && placed.add(v)
-    draft.matches.forEach((m) => (note(m.a), note(m.b)))
-    if (draft.third) (note(draft.third.a), note(draft.third.b))
-    unplaced = realDuplas.filter((d) => !placed.has(d.id))
-  }
-  const seedValid = draft && conflicts.size === 0 && selfMatches.size === 0
-
-  const saveEdit = () => {
-    if (!seedValid) return
-    // Reuse the bracket's existing W.O. ids for emptied byes; mint fresh ones only if short.
-    const woPool = []
-    const harvestWO = (id) => {
-      if (id != null && !realById[id]) woPool.push(id)
-    }
-    bracket.rounds.forEach((r) => r.forEach((m) => (harvestWO(m.dupAId), harvestWO(m.dupBId))))
-    if (bracket.thirdPlace) {
-      harvestWO(bracket.thirdPlace.dupAId)
-      harvestWO(bracket.thirdPlace.dupBId)
-    }
-    const toId = (v) =>
-      v === EMPTY || v == null ? null : v !== WO_SENTINEL ? v : woPool.shift() || uid('wo')
-
-    const draftRounds = Array.from({ length: phaseCount }, () => [])
-    draft.matches.forEach((m) => {
-      draftRounds[m.phase].push({
-        id: m.id,
-        dupAId: toId(m.a),
-        dupBId: toId(m.b),
-        winnerId: m.winnerId,
-      })
-    })
-    const draftThird = draft.third
-      ? {
-          dupAId: toId(draft.third.a),
-          dupBId: toId(draft.third.b),
-          winnerId: draft.third.winnerId,
-        }
-      : null
-
-    const liveEdited = state.currentMatchId != null
-    if (
-      !window.confirm(
-        'Salvar deixa o chaveamento manual: os vencedores não avançam mais sozinhos — você monta ' +
-          'cada fase. ' +
-          (liveEdited ? 'A partida atual no placar será encerrada. ' : '') +
-          'Resultados de confrontos cujas duplas mudaram serão limpos. O ranking histórico é ' +
-          'mantido. Continuar?',
-      )
-    )
-      return
-
-    const { bracket: newBracket, champion: newChampion } = applyManualEdit(
-      bracket,
-      draftRounds,
-      draftThird,
-    )
-    setState((s) => ({
-      ...s,
-      bracket: newBracket,
-      champion: newChampion,
-      currentMatchId: null,
-      cups: { left: CUPS_PER_TEAM, right: CUPS_PER_TEAM },
-      undoStack: [],
-    }))
-    setDraft(null)
-  }
-
+  // --- match actions ---
   const iniciar = (matchId) => {
     setState((s) => ({
       ...s,
@@ -222,29 +94,79 @@ export default function Bracket({ ctx }) {
     go('scoreboard')
   }
 
+  const onAddMatch = (track, roundIdx) => {
+    setState((s) => ({ ...s, bracket: addMatchToRound(s.bracket, track, roundIdx) }))
+  }
+
+  const onAddRound = (track) => {
+    setState((s) => ({ ...s, bracket: addRound(s.bracket, track) }))
+  }
+
+  const onSendToLower = (upperMatchId) => {
+    setState((s) => ({ ...s, bracket: sendLoserToLower(s.bracket, upperMatchId) }))
+  }
+
+  // --- drag & drop ---
+  const handlePoolDragStart = (duplaId) => {
+    setDragState({ duplaId, fromPool: true })
+  }
+
+  const handleSlotDragStart = (duplaId, matchId, side) => {
+    if (!duplaId) return
+    setDragState({ duplaId, fromPool: false, fromMatchId: matchId, fromSide: side })
+  }
+
+  const handleDragEnd = () => {
+    setDragState(null)
+    setDragOver(null)
+  }
+
+  const handleDropOnSlot = (targetMatchId, targetSide) => {
+    if (!dragState) return
+    setState((s) => {
+      let newBracket
+      if (dragState.fromPool) {
+        newBracket = assignDuplaToSlot(s.bracket, targetMatchId, targetSide, dragState.duplaId)
+      } else {
+        newBracket = swapDuplaSlots(
+          s.bracket,
+          dragState.fromMatchId, dragState.fromSide,
+          targetMatchId, targetSide,
+        )
+      }
+      return { ...s, bracket: newBracket }
+    })
+    setDragState(null)
+    setDragOver(null)
+  }
+
+  const handleDropOnPool = (e) => {
+    e.preventDefault()
+    if (!dragState || dragState.fromPool) { setDragState(null); setDragOver(null); return }
+    setState((s) => ({
+      ...s,
+      bracket: assignDuplaToSlot(s.bracket, dragState.fromMatchId, dragState.fromSide, null),
+    }))
+    setDragState(null)
+    setDragOver(null)
+  }
+
+  const dragProps = {
+    dragState, dragOver, setDragOver,
+    onSlotDragStart: handleSlotDragStart,
+    onSlotDrop: handleDropOnSlot,
+    onDragEnd: handleDragEnd,
+  }
+
   return (
     <div className="space-y-8">
       <div className="flex items-start justify-between gap-3">
         <SectionHead
           kicker="PASSO 2"
           title="Chaveamento"
-          sub={
-            bracket.manual
-              ? `Chaveamento manual de ${bracket.size} duplas. Você controla cada fase — edite à vontade.`
-              : `Mata-mata de ${bracket.size} duplas. Toque em INICIAR JOGO na partida liberada.`
-          }
+          sub={`Dupla eliminação de ${bracket.size} duplas. Arraste as duplas para os confrontos.`}
         />
-        <div className="mt-1 shrink-0 flex items-center gap-2">
-          {!editing && (
-            <button
-              onClick={startEdit}
-              title="Edite os confrontos e mova-os entre as fases. Ao salvar, o chaveamento vira manual."
-              className="flex items-center gap-1.5 rounded-lg border border-linha bg-mata-2
-                         px-3 py-2 font-mono text-xs text-gelo/50 hover:text-dourado hover:border-dourado/50 transition"
-            >
-              <Pencil size={14} /> Editar
-            </button>
-          )}
+        <div className="mt-1 shrink-0">
           <button
             onClick={onReset}
             className="flex items-center gap-1.5 rounded-lg border border-linha bg-mata-2
@@ -264,69 +186,75 @@ export default function Bracket({ ctx }) {
         />
       )}
 
-      {editing && (
-        <EditPanel
-          draft={draft}
-          realDuplas={realDuplas}
-          phaseLabels={phaseLabels}
-          conflicts={conflicts}
-          selfMatches={selfMatches}
-          unplaced={unplaced}
-          valid={seedValid}
-          setSlot={setSlot}
-          setPhase={setPhase}
-          setThirdSlot={setThirdSlot}
-          onSave={saveEdit}
-          onCancel={cancelEdit}
+      {/* DUPLAS POOL */}
+      <DuplasPool
+        duplas={realDuplas}
+        placedIds={placedIds}
+        dragState={dragState}
+        isDragOver={dragOver === 'pool'}
+        onDragStart={handlePoolDragStart}
+        onDragEnd={handleDragEnd}
+        onDragOver={(e) => { e.preventDefault(); setDragOver('pool') }}
+        onDragLeave={() => setDragOver(null)}
+        onDrop={handleDropOnPool}
+      />
+
+      <div className="space-y-10">
+        {/* UPPER BRACKET */}
+        <TrackSection
+          label="Chave Superior"
+          kicker="UPPER BRACKET — WINNERS"
+          accentClass="text-dourado"
+          borderClass="border-dourado/40"
+          rounds={bracket.upper || []}
+          roundLabelFn={(ri) => upperRoundLabel(bracket, ri)}
+          track="upper"
+          nameOf={nameOf}
+          isWO={isWO}
+          nextId={nextId}
+          nextRef={nextRef}
+          currentMatchId={state.currentMatchId}
+          lowerDuplaIds={lowerDuplaIds}
+          onIniciar={iniciar}
+          onAddMatch={onAddMatch}
+          onAddRound={onAddRound}
+          onSendToLower={onSendToLower}
+          dragProps={dragProps}
         />
-      )}
 
-      <div className={['flex gap-5 overflow-x-auto pb-4', editing ? 'hidden' : ''].join(' ')}>
-        {bracket.rounds.map((round, ri) => (
-          <div key={ri} className="shrink-0 w-64 flex flex-col">
-            <h3 className="font-display text-lg text-dourado mb-3 text-center">
-              {roundLabel(bracket, ri)}
-            </h3>
-            <div className="flex flex-col justify-around flex-1 gap-4">
-              {round.map((m) => {
-                const aKnown = m.dupAId != null
-                const bKnown = m.dupBId != null
-                const ready =
-                  !m.winnerId && aKnown && bKnown && !isWO(m.dupAId) && !isWO(m.dupBId)
-                const locked = !m.winnerId && (!aKnown || !bKnown)
-                const live = state.currentMatchId === m.id
-                const isNext = m.id === nextId && !live
-                return (
-                  <MatchCard
-                    key={m.id}
-                    cardRef={isNext ? nextRef : null}
-                    hasPrev={ri > 0}
-                    hasNext={ri < bracket.rounds.length - 1}
-                    aName={nameOf(m.dupAId)}
-                    bName={nameOf(m.dupBId)}
-                    aWin={m.winnerId && m.winnerId === m.dupAId}
-                    bWin={m.winnerId && m.winnerId === m.dupBId}
-                    decided={!!m.winnerId}
-                    ready={ready}
-                    locked={locked}
-                    live={live}
-                    isNext={isNext}
-                    onIniciar={() => iniciar(m.id)}
-                  />
-                )
-              })}
-            </div>
-          </div>
-        ))}
+        {/* LOWER BRACKET */}
+        <TrackSection
+          label="Chave Inferior"
+          kicker="LOWER BRACKET — REPESCAGEM"
+          accentClass="text-copo"
+          borderClass="border-copo/40"
+          rounds={bracket.lower || []}
+          roundLabelFn={(ri) => lowerRoundLabel(bracket, ri)}
+          track="lower"
+          nameOf={nameOf}
+          isWO={isWO}
+          nextId={nextId}
+          nextRef={nextRef}
+          currentMatchId={state.currentMatchId}
+          lowerDuplaIds={lowerDuplaIds}
+          onIniciar={iniciar}
+          onAddMatch={onAddMatch}
+          onAddRound={onAddRound}
+          onSendToLower={null}
+          dragProps={dragProps}
+        />
 
-        {bracket.thirdPlace && (
-          <ThirdPlaceColumn
-            tp={bracket.thirdPlace}
+        {/* GRANDE FINAL */}
+        {bracket.grandFinal && (
+          <GrandFinalSection
+            match={bracket.grandFinal}
             nameOf={nameOf}
             isWO={isWO}
-            live={state.currentMatchId === bracket.thirdPlace.id}
-            isNext={bracket.thirdPlace.id === nextId && state.currentMatchId !== bracket.thirdPlace.id}
-            onIniciar={() => iniciar(bracket.thirdPlace.id)}
+            live={state.currentMatchId === bracket.grandFinal.id}
+            isNext={bracket.grandFinal.id === nextId && state.currentMatchId !== bracket.grandFinal.id}
+            nextRef={bracket.grandFinal.id === nextId ? nextRef : null}
+            onIniciar={() => iniciar(bracket.grandFinal.id)}
+            dragProps={dragProps}
           />
         )}
       </div>
@@ -334,224 +262,229 @@ export default function Bracket({ ctx }) {
   )
 }
 
-// Standalone "3º Lugar" match between the two semifinal losers. Same card as the
-// bracket, but its own column (it feeds nothing, so no connector stubs).
-function ThirdPlaceColumn({ tp, nameOf, isWO, live, isNext, onIniciar }) {
-  const aKnown = tp.dupAId != null
-  const bKnown = tp.dupBId != null
-  const ready = !tp.winnerId && aKnown && bKnown && !isWO(tp.dupAId) && !isWO(tp.dupBId)
-  const locked = !tp.winnerId && (!aKnown || !bKnown)
-  return (
-    <div className="shrink-0 w-64 flex flex-col">
-      <h3 className="font-display text-lg text-gelo/70 mb-3 text-center">3º Lugar</h3>
-      <div className="flex flex-col justify-around flex-1 gap-4">
-        <MatchCard
-          hasPrev={false}
-          hasNext={false}
-          aName={nameOf(tp.dupAId)}
-          bName={nameOf(tp.dupBId)}
-          aWin={tp.winnerId && tp.winnerId === tp.dupAId}
-          bWin={tp.winnerId && tp.winnerId === tp.dupBId}
-          decided={!!tp.winnerId}
-          ready={ready}
-          locked={locked}
-          live={live}
-          isNext={isNext}
-          onIniciar={onIniciar}
-        />
-      </div>
-    </div>
-  )
-}
+// Pool of all duplas — drag source + drop target (to unplace).
+function DuplasPool({ duplas, placedIds, dragState, isDragOver, onDragStart, onDragEnd, onDragOver, onDragLeave, onDrop }) {
+  const unplaced = duplas.filter((d) => !placedIds.has(d.id))
+  const placed = duplas.filter((d) => placedIds.has(d.id))
 
-// Full bracket editor. Every phase is shown; each match exposes a phase selector (move
-// it between fases) and two slot <select>s over the dupla pool (plus free W.O. / Vazio).
-// The 3rd-place dispute is editable too. Validation flags same-phase duplicates and
-// self-matches and blocks save until clean.
-function EditPanel({
-  draft,
-  realDuplas,
-  phaseLabels,
-  conflicts,
-  selfMatches,
-  unplaced,
-  valid,
-  setSlot,
-  setPhase,
-  setThirdSlot,
-  onSave,
-  onCancel,
-}) {
-  return (
-    <div className="rounded-xl border border-dourado/60 bg-mata-2 p-4 space-y-5">
-      <div className="flex items-center gap-2 font-display text-lg text-dourado">
-        <ArrowLeftRight size={18} /> Editar chaveamento — todas as fases
-      </div>
-      <p className="font-mono text-xs text-gelo/50">
-        Monte qualquer confronto em qualquer fase e mova confrontos entre fases pelo seletor
-        FASE. Ao salvar, o chaveamento passa a ser manual: os vencedores não avançam sozinhos —
-        você define cada fase.
-      </p>
-      {(conflicts.size > 0 || selfMatches.size > 0) && (
-        <div className="rounded-lg border border-copo/60 bg-copo/10 px-3 py-2 font-mono text-xs text-copo space-y-1">
-          {conflicts.size > 0 && <div>Há dupla repetida na mesma fase.</div>}
-          {selfMatches.size > 0 && <div>Há confronto com a mesma dupla nos dois lados.</div>}
-        </div>
-      )}
-      {unplaced.length > 0 && (
-        <div className="rounded-lg border border-linha bg-mata px-3 py-2 font-mono text-xs text-gelo/50">
-          Fora do chaveamento: {unplaced.map((d) => d.name).join(', ')}.
-        </div>
-      )}
-
-      {phaseLabels.map((label, pi) => {
-        const ms = draft.matches.filter((m) => m.phase === pi)
-        return (
-          <div key={pi} className="space-y-2">
-            <h4 className="font-display text-base text-gelo/80">{label}</h4>
-            {ms.length === 0 ? (
-              <p className="font-mono text-[11px] text-gelo/30">Sem confrontos nesta fase.</p>
-            ) : (
-              <div className="grid gap-3 sm:grid-cols-2">
-                {ms.map((m) => (
-                  <MatchEditor
-                    key={m.id}
-                    m={m}
-                    realDuplas={realDuplas}
-                    phaseLabels={phaseLabels}
-                    selfMatch={selfMatches.has(m.id)}
-                    conflictA={conflicts.has(`${m.id}:a`)}
-                    conflictB={conflicts.has(`${m.id}:b`)}
-                    onPhase={(p) => setPhase(m.id, p)}
-                    onA={(v) => setSlot(m.id, 'a', v)}
-                    onB={(v) => setSlot(m.id, 'b', v)}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-        )
-      })}
-
-      {draft.third && (
-        <div className="space-y-2">
-          <h4 className="font-display text-base text-gelo/80">3º Lugar</h4>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div
-              className={[
-                'rounded-lg border bg-mata p-3 space-y-2',
-                selfMatches.has(draft.third.id) ? 'border-copo' : 'border-linha',
-              ].join(' ')}
-            >
-              <div className="font-mono text-[10px] tracking-widest text-gelo/40">DISPUTA DE 3º</div>
-              <SlotSelect
-                value={draft.third.a}
-                realDuplas={realDuplas}
-                conflict={selfMatches.has(draft.third.id)}
-                onChange={(v) => setThirdSlot('a', v)}
-              />
-              <div className="text-center font-display text-xs text-copo">VS</div>
-              <SlotSelect
-                value={draft.third.b}
-                realDuplas={realDuplas}
-                conflict={selfMatches.has(draft.third.id)}
-                onChange={(v) => setThirdSlot('b', v)}
-              />
-            </div>
-          </div>
-        </div>
-      )}
-
-      <div className="flex items-center justify-end gap-2">
-        <button
-          onClick={onCancel}
-          className="flex items-center gap-1.5 rounded-lg border border-gelo/30 px-4 py-2
-                     font-bold text-gelo hover:border-gelo/60 transition"
-        >
-          <X size={16} /> Cancelar
-        </button>
-        <button
-          onClick={onSave}
-          disabled={!valid}
-          className={[
-            'flex items-center gap-1.5 rounded-lg px-4 py-2 font-bold transition',
-            valid
-              ? 'bg-dourado text-mata hover:brightness-105'
-              : 'bg-dourado/30 text-mata/50 cursor-not-allowed',
-          ].join(' ')}
-        >
-          <Check size={16} /> Salvar chaveamento
-        </button>
-      </div>
-    </div>
-  )
-}
-
-// One editable confronto: a FASE selector (move between phases) + the two slot selects.
-function MatchEditor({ m, realDuplas, phaseLabels, selfMatch, conflictA, conflictB, onPhase, onA, onB }) {
   return (
     <div
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
       className={[
-        'rounded-lg border bg-mata p-3 space-y-2',
-        selfMatch ? 'border-copo' : 'border-linha',
+        'rounded-xl border p-3 transition-colors',
+        isDragOver && dragState && !dragState.fromPool
+          ? 'border-copo/60 bg-copo/5'
+          : 'border-linha bg-mata-2',
       ].join(' ')}
     >
-      <div className="flex items-center justify-between gap-2">
-        <span className="font-mono text-[10px] tracking-widest text-gelo/40">CONFRONTO</span>
-        <label className="flex items-center gap-1.5 font-mono text-[10px] tracking-widest text-gelo/40">
-          FASE
-          <select
-            value={m.phase}
-            onChange={(e) => onPhase(Number(e.target.value))}
-            className="rounded border border-linha bg-mata-2 px-1.5 py-1 font-sans text-xs text-gelo
-                       focus:outline-none focus:border-dourado"
-          >
-            {phaseLabels.map((lab, i) => (
-              <option key={i} value={i}>
-                {lab}
-              </option>
-            ))}
-          </select>
-        </label>
+      <div className="flex items-center gap-2 mb-2">
+        <p className="font-mono text-[10px] tracking-widest text-gelo/40">DUPLAS</p>
+        {isDragOver && dragState && !dragState.fromPool && (
+          <p className="font-mono text-[10px] text-copo/70">Solte aqui para remover do chaveamento</p>
+        )}
+        {unplaced.length === 0 && duplas.length > 0 && (
+          <p className="font-mono text-[10px] text-gelo/30">Todas as duplas estão no chaveamento</p>
+        )}
       </div>
-      <SlotSelect value={m.a} realDuplas={realDuplas} conflict={conflictA || selfMatch} onChange={onA} />
-      <div className="text-center font-display text-xs text-copo">VS</div>
-      <SlotSelect value={m.b} realDuplas={realDuplas} conflict={conflictB || selfMatch} onChange={onB} />
+      <div className="flex flex-wrap gap-2">
+        {unplaced.map((d) => (
+          <DuplaChip key={d.id} dupla={d} placed={false} onDragStart={onDragStart} onDragEnd={onDragEnd} />
+        ))}
+        {placed.map((d) => (
+          <DuplaChip key={d.id} dupla={d} placed={true} onDragStart={onDragStart} onDragEnd={onDragEnd} />
+        ))}
+        {duplas.length === 0 && (
+          <p className="font-mono text-xs text-gelo/30">Nenhuma dupla formada ainda.</p>
+        )}
+      </div>
     </div>
   )
 }
 
-function SlotSelect({ value, realDuplas, conflict, onChange }) {
+function DuplaChip({ dupla, placed, onDragStart, onDragEnd }) {
   return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
+    <div
+      draggable
+      onDragStart={() => onDragStart(dupla.id)}
+      onDragEnd={onDragEnd}
       className={[
-        'w-full rounded-lg border bg-mata-2 px-3 py-2 font-medium text-gelo focus:outline-none',
-        conflict ? 'border-copo focus:border-copo' : 'border-linha focus:border-dourado',
+        'flex items-center gap-1.5 rounded-lg border px-3 py-1.5 font-medium text-sm cursor-grab active:cursor-grabbing select-none transition',
+        placed
+          ? 'border-linha bg-mata text-gelo/40'
+          : 'border-dourado/50 bg-mata-2 text-gelo hover:border-dourado hover:bg-mata',
       ].join(' ')}
     >
-      <option value={EMPTY}>— Vazio —</option>
-      {realDuplas.map((d) => (
-        <option key={d.id} value={d.id}>
-          {d.name}
-        </option>
-      ))}
-      <option value={WO_SENTINEL}>W.O. (vaga livre)</option>
-    </select>
+      <GripVertical size={13} className="shrink-0 opacity-50" />
+      {dupla.name}
+    </div>
   )
 }
 
-function MatchCard({ cardRef, hasPrev, hasNext, aName, bName, aWin, bWin, decided, ready, locked, live, isNext, onIniciar }) {
+function TrackSection({
+  label, kicker, accentClass, borderClass,
+  rounds, roundLabelFn, track,
+  nameOf, isWO, nextId, nextRef, currentMatchId, lowerDuplaIds,
+  onIniciar, onAddMatch, onAddRound, onSendToLower,
+  dragProps,
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="font-mono text-[10px] tracking-widest text-gelo/40">{kicker}</p>
+          <h3 className={`font-display text-xl ${accentClass}`}>{label}</h3>
+        </div>
+        <button
+          onClick={() => onAddRound(track)}
+          className={`flex items-center gap-1.5 rounded-lg border ${borderClass} bg-mata-2
+                     px-3 py-1.5 font-mono text-[11px] text-gelo/50 hover:text-gelo transition`}
+        >
+          <Plus size={12} /> Nova Fase
+        </button>
+      </div>
+
+      {rounds.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-linha bg-mata-2 p-6 text-center">
+          <p className="font-mono text-xs text-gelo/40 mb-3">
+            {track === 'lower'
+              ? 'Lower bracket vazio. Use → Lower nos jogos do Upper ou adicione uma fase.'
+              : 'Sem fases no bracket.'}
+          </p>
+          <button
+            onClick={() => onAddRound(track)}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-linha
+                       bg-mata px-4 py-2 font-mono text-xs text-gelo/60 hover:text-gelo transition"
+          >
+            <Plus size={13} /> Adicionar fase
+          </button>
+        </div>
+      ) : (
+        <div className="flex gap-5 overflow-x-auto pb-4">
+          {rounds.map((round, ri) => {
+            const hasNext = ri < rounds.length - 1
+            return (
+              <div key={ri} className="shrink-0 w-64 flex flex-col">
+                <div className="flex items-center justify-between mb-3">
+                  <h4 className={`font-display text-lg ${accentClass}`}>{roundLabelFn(ri)}</h4>
+                  <button
+                    onClick={() => onAddMatch(track, ri)}
+                    className="flex items-center gap-1 rounded border border-linha bg-mata-2
+                               px-2 py-1 font-mono text-[10px] text-gelo/40 hover:text-gelo transition"
+                  >
+                    <Plus size={10} /> Jogo
+                  </button>
+                </div>
+                <div className="flex flex-col gap-4 flex-1">
+                  {round.map((m) => {
+                    const aKnown = m.dupAId != null
+                    const bKnown = m.dupBId != null
+                    const ready = !m.winnerId && aKnown && bKnown && !isWO(m.dupAId) && !isWO(m.dupBId)
+                    const locked = !m.winnerId && (!aKnown || !bKnown)
+                    const live = currentMatchId === m.id
+                    const isNextM = m.id === nextId && !live
+
+                    let loserId = null
+                    if (track === 'upper' && m.winnerId) {
+                      loserId = m.winnerId === m.dupAId ? m.dupBId : m.dupAId
+                    }
+                    const loserInLower = loserId && lowerDuplaIds.has(loserId)
+
+                    return (
+                      <MatchCard
+                        key={m.id}
+                        cardRef={isNextM ? nextRef : null}
+                        hasPrev={ri > 0}
+                        hasNext={hasNext}
+                        match={m}
+                        nameOf={nameOf}
+                        aWin={m.winnerId && m.winnerId === m.dupAId}
+                        bWin={m.winnerId && m.winnerId === m.dupBId}
+                        decided={!!m.winnerId}
+                        ready={ready}
+                        locked={locked}
+                        live={live}
+                        isNext={isNextM}
+                        onIniciar={() => onIniciar(m.id)}
+                        showSendToLower={track === 'upper' && !!loserId && !loserInLower && !!onSendToLower}
+                        loserInLower={loserInLower}
+                        loserName={loserId ? nameOf(loserId) : null}
+                        onSendToLower={onSendToLower ? () => onSendToLower(m.id) : null}
+                        dragProps={dragProps}
+                      />
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function GrandFinalSection({ match, nameOf, isWO, live, isNext, nextRef, onIniciar, dragProps }) {
+  if (!match) return null
+  const aKnown = match.dupAId != null
+  const bKnown = match.dupBId != null
+  const ready = !match.winnerId && aKnown && bKnown && !isWO(match.dupAId) && !isWO(match.dupBId)
+  const locked = !match.winnerId && (!aKnown || !bKnown)
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <p className="font-mono text-[10px] tracking-widest text-gelo/40">GRANDE FINAL</p>
+        <h3 className="font-display text-xl text-dourado">Grande Final</h3>
+      </div>
+      <div className="flex justify-center">
+        <div className="w-72">
+          <MatchCard
+            cardRef={nextRef}
+            hasPrev={false}
+            hasNext={false}
+            match={match}
+            nameOf={nameOf}
+            aWin={match.winnerId && match.winnerId === match.dupAId}
+            bWin={match.winnerId && match.winnerId === match.dupBId}
+            decided={!!match.winnerId}
+            ready={ready}
+            locked={locked}
+            live={live}
+            isNext={isNext}
+            onIniciar={onIniciar}
+            showSendToLower={false}
+            loserInLower={false}
+            loserName={null}
+            onSendToLower={null}
+            isGrandFinal
+            dragProps={dragProps}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function MatchCard({
+  cardRef, hasPrev, hasNext,
+  match, nameOf,
+  aWin, bWin, decided, ready, locked, live, isNext, isGrandFinal,
+  onIniciar,
+  showSendToLower, loserInLower, loserName, onSendToLower,
+  dragProps,
+}) {
+  const { dragState, dragOver, setDragOver, onSlotDragStart, onSlotDrop, onDragEnd } = dragProps
+  const isDragActive = !!dragState
+
+  const isAOver = dragOver?.matchId === match.id && dragOver?.side === 'a'
+  const isBOver = dragOver?.matchId === match.id && dragOver?.side === 'b'
+
   return (
     <div ref={cardRef} className="relative">
-      {/* Connector stubs bridging the gap-5 columns — reads as a bracket tree. */}
-      {hasPrev && (
-        <span aria-hidden className="absolute top-1/2 -left-5 h-px w-5 bg-linha" />
-      )}
-      {hasNext && (
-        <span aria-hidden className="absolute top-1/2 -right-5 h-px w-5 bg-linha" />
-      )}
+      {hasPrev && <span aria-hidden className="absolute top-1/2 -left-5 h-px w-5 bg-linha" />}
+      {hasNext && <span aria-hidden className="absolute top-1/2 -right-5 h-px w-5 bg-linha" />}
       <div
         className={[
           'rounded-lg border bg-mata-2 overflow-hidden transition',
@@ -559,19 +492,51 @@ function MatchCard({ cardRef, hasPrev, hasNext, aName, bName, aWin, bWin, decide
             ? 'border-copo'
             : isNext
               ? 'border-dourado ring-2 ring-dourado/50 taca-pulse'
-              : ready
-                ? 'border-dourado/60'
-                : 'border-linha',
+              : isGrandFinal
+                ? 'border-dourado/70'
+                : ready
+                  ? 'border-dourado/60'
+                  : 'border-linha',
         ].join(' ')}
       >
+        {isGrandFinal && !isNext && (
+          <div className="bg-dourado/10 px-3 py-1 text-center font-mono text-[10px] tracking-widest text-dourado">
+            GRANDE FINAL
+          </div>
+        )}
         {isNext && (
           <div className="bg-dourado/15 px-3 py-1 text-center font-mono text-[10px] tracking-widest text-dourado">
             PRÓXIMO JOGO
           </div>
         )}
-        <Side name={aName} win={aWin} dim={decided && !aWin} />
+
+        <DragSlot
+          duplaId={match.dupAId}
+          name={nameOf(match.dupAId)}
+          win={aWin}
+          dim={decided && !aWin}
+          isDragActive={isDragActive}
+          isOver={isAOver}
+          onDragStart={() => onSlotDragStart(match.dupAId, match.id, 'a')}
+          onDragOver={(e) => { e.preventDefault(); setDragOver({ matchId: match.id, side: 'a' }) }}
+          onDragLeave={() => setDragOver(null)}
+          onDrop={() => onSlotDrop(match.id, 'a')}
+          onDragEnd={onDragEnd}
+        />
         <div className="h-px bg-linha" />
-        <Side name={bName} win={bWin} dim={decided && !bWin} />
+        <DragSlot
+          duplaId={match.dupBId}
+          name={nameOf(match.dupBId)}
+          win={bWin}
+          dim={decided && !bWin}
+          isDragActive={isDragActive}
+          isOver={isBOver}
+          onDragStart={() => onSlotDragStart(match.dupBId, match.id, 'b')}
+          onDragOver={(e) => { e.preventDefault(); setDragOver({ matchId: match.id, side: 'b' }) }}
+          onDragLeave={() => setDragOver(null)}
+          onDrop={() => onSlotDrop(match.id, 'b')}
+          onDragEnd={onDragEnd}
+        />
 
         {ready && (
           <button
@@ -588,23 +553,62 @@ function MatchCard({ cardRef, hasPrev, hasNext, aName, bName, aWin, bWin, decide
             <Lock size={13} /> Aguardando
           </div>
         )}
+
+        {showSendToLower && (
+          <button
+            onClick={onSendToLower}
+            className="w-full flex items-center justify-center gap-1.5 border-t border-linha
+                       bg-mata px-3 py-1.5 font-mono text-[11px] text-gelo/45
+                       hover:text-copo hover:bg-copo/5 transition"
+          >
+            <ArrowDown size={12} /> {loserName} → Lower
+          </button>
+        )}
+        {decided && !showSendToLower && loserInLower && (
+          <div className="w-full flex items-center justify-center gap-1.5 border-t border-linha
+                         bg-mata px-3 py-1.5 font-mono text-[11px] text-gelo/25">
+            ✓ {loserName} no Lower
+          </div>
+        )}
       </div>
     </div>
   )
 }
 
-function Side({ name, win, dim }) {
+// One draggable/droppable slot inside a match card.
+function DragSlot({ duplaId, name, win, dim, isDragActive, isOver, onDragStart, onDragOver, onDragLeave, onDrop, onDragEnd }) {
+  const hasDupla = duplaId != null
+  const isEmpty = !hasDupla
+
   return (
     <div
+      draggable={hasDupla}
+      onDragStart={hasDupla ? onDragStart : undefined}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+      onDragEnd={onDragEnd}
       className={[
-        'flex items-center gap-2 px-3 py-2.5',
+        'flex items-center gap-2 px-3 py-2.5 transition-colors',
         win ? 'bg-dourado/10' : '',
         dim ? 'opacity-45' : '',
+        isOver ? 'bg-dourado/20 ring-1 ring-inset ring-dourado/60' : '',
+        isDragActive && !isOver && isEmpty ? 'bg-mata/60' : '',
+        hasDupla ? 'cursor-grab active:cursor-grabbing' : '',
+        isDragActive && isEmpty ? 'border-dashed' : '',
       ].join(' ')}
     >
       {win && <Crown size={15} className="text-dourado shrink-0" />}
-      <span className={['font-medium truncate', win ? 'text-dourado' : 'text-gelo'].join(' ')}>
-        {name}
+      {hasDupla && !win && isDragActive && (
+        <GripVertical size={13} className="text-gelo/30 shrink-0" />
+      )}
+      <span
+        className={[
+          'font-medium truncate text-sm',
+          win ? 'text-dourado' : isEmpty ? 'text-gelo/25 italic text-xs' : 'text-gelo',
+        ].join(' ')}
+      >
+        {isEmpty ? 'vazio' : name}
       </span>
     </div>
   )
@@ -614,7 +618,7 @@ function ChampionBanner({ name, edition, onRanking, onReset }) {
   return (
     <div className="taca-pop rounded-xl border border-dourado bg-dourado/10 p-5 text-center taca-gold">
       <img src="/taca-logo.png" alt="" className="mx-auto h-20 w-auto drop-shadow-lg" />
-      <Crown size={32} className="mx-auto text-dourado mt-1" />
+      <Trophy size={32} className="mx-auto text-dourado mt-1" />
       {edition && <p className="font-display text-xl text-gelo mt-1">{edition}</p>}
       <p className="font-mono text-xs tracking-widest text-dourado mt-2">CAMPEÃO DO TORNEIO</p>
       <p className="font-display text-3xl text-gelo mt-1">{name}</p>
